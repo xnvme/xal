@@ -88,5 +88,9 @@ test-reflink-using-nvme:
 		--config configs/localhost-nvme.toml \
 		--monitor
 
+.PHONY: unit-test
+unit-test:
+	meson test -C $(BUILDDIR) --suite unit
+
 .PHONY: test
 test: test-using-loop
