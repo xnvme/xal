@@ -102,6 +102,7 @@ Inodes and extents are stored in separate contiguous pools backed by `mmap`. Poo
 - `tools/xal-server/` -- daemon publishing xal indexes over POSIX shared memory (optional, needs tomlc17)
 - `tests/test.h` -- `TEST_ASSERT()` and `TEST_RUN()` for the C tests
 - `tests/unit/test_pool.c` -- unit tests for `xal_pool`
+- `tests/unit/test_xal.c` -- unit tests for the core functions in `src/xal.c`
 - `tp/khash.h` -- third-party hash map (used for file lookup mode)
 
 ## Code style
