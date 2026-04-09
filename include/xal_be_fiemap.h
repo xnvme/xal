@@ -2,9 +2,10 @@ struct xal_be_fiemap {
 	struct xal_backend_base base;
 	char *mountpoint;      ///< Path to mountpoint of dev
 	struct xal_inotify *inotify;
+	struct xal_bpf *bpf;
 	void *path_inode_map;  ///< Map of paths to inodes
 
-	uint8_t _rsvd[16];
+	uint8_t _rsvd[8];
 };
 XAL_STATIC_ASSERT(sizeof(struct xal_be_fiemap) == XAL_BACKEND_SIZE, "Incorrect size");
 

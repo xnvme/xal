@@ -36,9 +36,66 @@ xnvme_dep = dependency(
   required: true
 )
 
+# BPF: build dependencies
+libbpf_dep = dependency('libbpf', required: true)
+libelf_dep = dependency('libelf', required: true)
+zlib_dep = dependency('zlib', required: true)
+
+bpftool = find_program('bpftool', required: true)
+clang = find_program('clang', required: true)
+
+# BPF: BTF source file
+vmlinux_btf = '/sys/kernel/btf/vmlinux'
+
+# BPF: generate vmlinux.h
+vmlinux_h = custom_target(
+  'xal-vmlinux-h',
+  output : 'vmlinux.h',
+  command : [bpftool, 'btf', 'dump', 'file', vmlinux_btf, 'format', 'c'],
+  capture : true
+)
+
+# BPF: compile flags
+bpf_cflags = [
+  '-O2', '-g',
+  '-target', 'bpf',
+  '-D__TARGET_ARCH_x86',
+  '-I' + meson.current_build_dir(),
+  '-I' + meson.current_source_dir() / 'src',
+  '-I' + meson.current_source_dir() / 'include',
+]
+
+# BPF: build .bpf.o
+bpf_obj = custom_target(
+  'xal-bpf-events-obj',
+  input : ['src/xal_bpf_events.bpf.c', vmlinux_h],
+  output : 'xal_bpf_events.bpf.o',
+  command : [
+    clang,
+	bpf_cflags,
+	'-c', '@INPUT0@',
+	'-o', '@OUTPUT@'
+  ]
+)
+
+# BPF: generate skeleton
+# 'name' overrides the struct/prefix bpftool would otherwise derive from the
+# object basename ("xal_bpf_events_bpf"). Keep this in sync with the struct
+# name used in src/xal_bpf.c and include/xal_bpf.h.
+skel = custom_target(
+  'xal-bpf-events-skel',
+  input : bpf_obj,
+  output : 'xal_bpf_events.skel.h',
+  command : [bpftool, 'gen', 'skeleton', '@INPUT@', 'name', 'xal_bpf_events'],
+  capture : true
+)
+
 xallib_deps = [
   rt_dep,
   xnvme_dep,
+  libbpf_dep,
+  libelf_dep,
+  zlib_dep,
 ]
 
 public_headers = files(
@@ -50,16 +107,17 @@ sources = files(
   'src/xal.c',
   'src/xal_be_fiemap.c',
   'src/xal_be_fiemap_inotify.c',
+  'src/xal_bpf.c',
   'src/xal_be_xfs.c',
   'src/xal_pool.c',
   'src/pp.c',
   'src/utils.c'
 )
 
-include_dirs = include_directories('include', 'tp')
+include_dirs = include_directories('include', 'tp', '.')
 
 xal_library = library('xal',
-  sources: sources,
+  sources: [skel, sources],
   dependencies: xallib_deps,
   include_directories: include_dirs,
   install: true,

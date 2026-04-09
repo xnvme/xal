@@ -16,11 +16,14 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <xal.h>
 #include <xal_be_fiemap.h>
 #include <xal_be_fiemap_inotify.h>
 #include <xal_odf.h>
+#include <xal_bpf_events.h>
+#include <xal_bpf.h>
 
 KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
 
@@ -45,6 +48,10 @@ xal_be_fiemap_close(struct xal *xal)
 	if (be->inotify) {
 		xal_be_fiemap_inotify_close(be->inotify);
 	} else {
+		if (be->bpf) {
+			xal_be_fiemap_bpf_close(be->bpf);
+		}
+
 		int fd = open(be->mountpoint, O_RDONLY | O_DIRECTORY);
 
 		if (fd >= 0) {
@@ -177,6 +184,12 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	}
 
 	strcpy(be->mountpoint, mountpoint);
+	err = stat(be->mountpoint, &sb);
+	if (err) {
+		XAL_DEBUG("FAILED: stat(%s); errno(%d)", be->mountpoint, errno);
+		err = -errno;
+		goto failed;
+	}
 
 	if (opts->watch_mode) {
 		be->inotify = calloc(1, sizeof(struct xal_inotify));
@@ -193,6 +206,30 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		}
 	} else {
 		// since fs is mounted without a watch mode, freeze it
+		// + init bpf thread to listen to unfreeze events
+		struct xal_bpf *bpf = calloc(1, sizeof(struct xal_bpf));
+		if (!bpf) {
+			XAL_DEBUG("FAILED: calloc(); errno(%d)", errno);
+			err = -errno;
+			goto failed;
+		}
+
+		// glibc major()/minor() and the kernel's MKDEV(20,12) split on s_dev
+		// produce the same numeric values, so userspace and BPF can compare
+		// directly. If a kernel changes that split, the BPF filter will start
+		// dropping every event as "ignored" -- check skel->bss->stats.ignored_events.
+		bpf->ctx.dev_major = major(sb.st_dev);
+		bpf->ctx.dev_minor = minor(sb.st_dev);
+		bpf->ctx.fs_block_size = sb.st_blksize;
+
+		err = xal_be_fiemap_bpf_init(bpf);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_bpf_init()");
+			goto failed;
+		}
+
+		be->bpf = bpf;
+
 		int fd = open(mountpoint, O_RDONLY | O_DIRECTORY);
 
 		if (fd < 0) {
@@ -213,19 +250,24 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 			XAL_DEBUG("INFO: froze filesystem");
 		}
 		close(fd);
+
+		err = xal_be_fiemap_bpf_rb_init(be->bpf);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_bpf_rb_init(); err(%d)", err);
+			goto failed;
+		}
+
+		err = xal_bpf_start_poll_thread(cand);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_bpf_start_poll_thread(); err(%d)", err);
+			goto failed;
+		}
 	}
 
 	nallocated = retrieve_total_entries(be->mountpoint);
 	if (nallocated < 0) {
 		XAL_DEBUG("Failed: retrieve_total_entries()");
 		err = nallocated;
-		goto failed;
-	}
-
-	err = stat(be->mountpoint, &sb);
-	if (err) {
-		XAL_DEBUG("FAILED: stat(%s); errno(%d)", be->mountpoint, errno);
-		err = -errno;
 		goto failed;
 	}
 
@@ -239,6 +281,7 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	}
 
 	shm = NULL;
+
 	if (opts->shm_name) {
 		snprintf(shm_name, sizeof(shm_name), "%s_inodes", opts->shm_name);
 		shm = shm_name;
