@@ -290,20 +290,36 @@ int
 xal_index(struct xal *xal);
 
 /**
+ * Callback invoked by the background watch thread immediately after the xal struct is marked
+ * dirty. Dirty means breaking filesystem changes (file creation, deletion, or rename) were
+ * detected, and the in-memory representation is now stale.
+ *
+ * The callback is called from the watch thread; keep it short and thread-safe.
+ *
+ * @param xal     The xal struct that became dirty.
+ * @param cb_args The opaque pointer passed to xal_watch_filesystem().
+ */
+typedef void (*xal_dirty_cb)(struct xal *xal, void *cb_args);
+
+/**
  * Start a background thread listening to inotify events of changes to the file system on the
  * block device.
- * 
+ *
  * Assumes that
  *  - the file system is mounted,
  *  - you have run xal_open() with backend FIEMAP and a watch_mode other than XAL_WATCHMODE_NONE,
  *  - you have indexed the file system with xal_index().
- * 
+ *
  * If these assumptions do not hold, this will result in an error.
- * 
+ *
+ * @param xal     The xal struct obtained when opened with xal_open().
+ * @param cb      Optional callback invoked when xal becomes dirty. May be NULL.
+ * @param cb_args Opaque pointer forwarded to cb. May be NULL.
+ *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
-xal_watch_filesystem(struct xal *xal);
+xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args);
 
 /**
  * Stop the background thread listening to inotify events of changes to the file system on the

@@ -332,7 +332,10 @@ background_thread_start(void *arg)
 
 		if (err) {
 			XAL_DEBUG("INFO: Found breaking changes, setting xal->dirty to true");
-			xal->dirty = true;
+			atomic_store(&xal->dirty, true);
+			if (be->inotify->cb) {
+				be->inotify->cb(xal, be->inotify->cb_args);
+			}
 		}
 
 	}
@@ -345,7 +348,7 @@ exit_thread:
 }
 
 int
-xal_watch_filesystem(struct xal *xal)
+xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args)
 {
 	struct xal_backend_base *base;
 	struct xal_be_fiemap *be;
@@ -377,6 +380,9 @@ xal_watch_filesystem(struct xal *xal)
 		XAL_DEBUG("FAILED: Missing call to xal_index()");
 		return -EINVAL;
 	}
+
+	be->inotify->cb = cb;
+	be->inotify->cb_args = cb_args;
 
 	err = pthread_create(&be->inotify->watch_thread_id, NULL, &background_thread_start, xal);
 	if (err) {
