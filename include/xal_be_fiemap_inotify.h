@@ -6,6 +6,8 @@ struct xal_inotify {
 	void *inode_map;  ///< Map of inodes from inotify watch descriptors
 	pthread_t watch_thread_id;
 	int flag;
+	xal_dirty_cb cb;
+	void *cb_args;
 };
 
 void
