@@ -86,6 +86,14 @@ dev_read_into(struct xnvme_dev *dev, void *iobuf, size_t count, off_t offset, vo
 	return 0;
 }
 
+static int
+compare_inode(const void *a, const void *b)
+{
+	const struct xal_inode *ia = (const struct xal_inode *)a;
+	const struct xal_inode *ib = (const struct xal_inode *)b;
+	return strcmp(ia->name, ib->name);
+}
+
 static __attribute__((unused)) uint32_t
 ino_abs_to_rel(struct xal *xal, uint64_t inoabs)
 {
@@ -1009,6 +1017,15 @@ process_dinode_dir_btree_root(struct xal *xal, struct xal_odf_dinode *dinode,
 		}
 	}
 
+	{
+		/* Sort the entries in the directory to allow for binary search */
+		struct xal_inode *all_inodes = (struct xal_inode *)xal->inodes.memory;
+		struct xal_inode *these_inodes = &all_inodes[self->content.dentries.inodes_idx];
+		uint32_t count = self->content.dentries.count;
+
+		qsort(these_inodes, count, sizeof(struct xal_inode), compare_inode);
+	}
+
 	XAL_DEBUG("=### Processing: inodes constructed when chasing File-System Block Pointers")
 	XAL_DEBUG("INFO: dentries.count(%" PRIu32 ")", self->content.dentries.count);
 	for (uint32_t i = 0; i < self->content.dentries.count; ++i) {
@@ -1301,6 +1318,14 @@ process_dinode_dir_local(struct xal *xal, struct xal_odf_dinode *dinode, struct 
 		}
 	}
 
+	{
+		/* Sort the entries in the directory to allow for binary search */
+		struct xal_inode *all_inodes = (struct xal_inode *)xal->inodes.memory;
+		struct xal_inode *these_inodes = &all_inodes[self->content.dentries.inodes_idx];
+
+		qsort(these_inodes, count, sizeof(struct xal_inode), compare_inode);
+	}
+
 	for (int i = 0; i < count; ++i) {
 		struct xal_inode *dentry = xal_inode_at(xal, self->content.dentries.inodes_idx + i);
 
@@ -1556,6 +1581,15 @@ process_dinode_dir_extents(struct xal *xal, struct xal_odf_dinode *dinode, struc
 		}
 
 		nbytes -= extent.nblocks * xal->sb.blocksize;
+	}
+
+	{
+		/* Sort the entries in the directory to allow for binary search */
+		struct xal_inode *all_inodes = (struct xal_inode *)xal->inodes.memory;
+		struct xal_inode *these_inodes = &all_inodes[self->content.dentries.inodes_idx];
+		uint32_t count = self->content.dentries.count;
+
+		qsort(these_inodes, count, sizeof(struct xal_inode), compare_inode);
 	}
 
 	XAL_DEBUG("=### Processing: inodes constructed when decoding dir(FMT_EXTENTS)")
