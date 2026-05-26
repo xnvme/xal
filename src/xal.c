@@ -558,6 +558,92 @@ xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_e
 	return 0;
 }
 
+static int
+compare_name_to_inode(const void *key, const void *elem)
+{
+	const char *component = key;
+	const struct xal_inode *inode = elem;
+
+	const char *basename = strrchr(inode->name, '/');
+	if (basename) {
+		basename++;
+	} else {
+		basename = inode->name;
+	}
+
+	return strcmp(component, basename);
+}
+
+int
+search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, struct xal_inode **inode)
+{
+	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
+	struct xal_inode *search, *found = NULL;
+	char *search_begin, *search_end;
+	size_t mountpoint_len;
+
+	mountpoint_len = strlen(be->mountpoint);
+
+	if (!root) {
+		XAL_DEBUG("FAILED: no xal->root, call xal_index()");
+		return -EINVAL;
+	}
+
+	if (strlen(path) <= mountpoint_len + 1) {
+		XAL_DEBUG("FAILED: Not a valid path(%s); path too short; must be absolute path to entry in mountpoint(%s)",
+			path, be->mountpoint);
+		return -EINVAL;
+	}
+
+	if (strncmp(path, be->mountpoint, mountpoint_len) != 0) {
+		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; must be absolute path to entry in mountpoint(%s)",
+			path, be->mountpoint);
+		return -EINVAL;
+	}
+
+	search = root;
+	search_begin = path + mountpoint_len + 1;
+	search_end = strchr(search_begin, '/');
+
+	while (!found) {
+		struct xal_inode *child;
+		size_t search_len = search_end ? (size_t)(search_end - search_begin) : strlen(search_begin);
+		char component[search_len + 1];
+
+		memcpy(component, search_begin, search_len);
+		component[search_len] = '\0';
+
+		XAL_DEBUG("Searching for component(%s)", component);
+
+		child = bsearch(component, xal_inode_at(xal, search->content.dentries.inodes_idx),
+				search->content.dentries.count, sizeof(struct xal_inode), compare_name_to_inode);
+
+		if (!child) {
+			XAL_DEBUG("Component(%s) not found", component);
+			break;
+		}
+
+		if (!search_end) {
+			XAL_DEBUG("Final component(%s) found", component);
+			found = child;
+		} else {
+			XAL_DEBUG("Component(%s) found, continuing", component);
+			search = child;
+			search_begin = search_end + 1;
+			search_end = strchr(search_begin, '/');
+		}
+	}
+
+	if (!found) {
+		XAL_DEBUG("FAILED: Inode not found");
+		return -ENOENT;
+	}
+
+	*inode = found;
+
+	return 0;
+}
+
 int
 xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 {
