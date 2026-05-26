@@ -47,4 +47,4 @@ struct xal {
 };
 
 int
-search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, struct xal_inode **inode);
+search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode);

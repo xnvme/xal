@@ -745,7 +745,7 @@ xal_be_fiemap_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 		*inode = kh_val(map, iter);
 
 	} else {
-		err = search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, inode);
+		err = search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, be->mountpoint, inode);
 		if (err) {
 			XAL_DEBUG("FAILED: search_by_traversal(%s); err(%d)", path, err);
 			return err;
