@@ -45,3 +45,6 @@ struct xal {
 	struct xal_shared_state *state; ///< Mapped shared state region; non-NULL when shm_name was set
 	char *state_shm_name;           ///< Name of the _state shm region; set by primary only, for unlink on close
 };
+
+int
+search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, struct xal_inode **inode);
