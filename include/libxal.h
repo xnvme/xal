@@ -246,29 +246,6 @@ void
 xal_close(struct xal *xal);
 
 /**
- * Construct a read-only xal from externally provided pool memory.
- *
- * Intended for processes that receive pool memory via POSIX shared memory from elsewhere.
- * The caller is responsible for mapping the shared memory regions before calling this with the
- * shm_name given in the xal_opts.
- * The resulting xal can be closed with xal_close(), which will free the struct xal allocation but
- * will not munmap or unlink the pool memory regions — that remains the caller's responsibility.
- *
- * @param sb           Superblock metadata
- * @param mountpoint   Mountpoint of the file system
- * @param inodes_mem   Pointer to the mapped inode pool memory; the root inode must be at index 0
- * @param extents_mem  Pointer to the mapped extent pool memory
- * @param dirty        Pointer to an atomic bool in shared memory used as the dirty flag; typically
- *                     the mapping of the {shm_name}_dirty region created by the producer
- * @param out          Output pointer for the constructed xal
- *
- * @return On success, 0. On error, negative errno.
- */
-int
-xal_from_pools(const struct xal_sb *sb, const char *mountpoint, void *inodes_mem,
-	void *extents_mem, _Atomic bool *dirty, struct xal **out);
-
-/**
  * Retrieve inodes from disk and decode the on-disk-format of the retrieved data
  *
  * @param xal Pointer to the xal
@@ -354,6 +331,24 @@ xal_walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb
 
 uint64_t
 xal_fsbno_offset(struct xal *xal, uint64_t fsbno);
+
+/**
+ * Construct a read-only xal from externally provided shared memory.
+ *
+ * Intended for multi-process support, where a primary process has built the xal tree with
+ * opts->shm_name set.
+ * The resulting xal can be closed with xal_close(), which will free the struct xal allocation and
+ * munmap the pool memory regions.
+ *
+ * @param shm_name	   ID for shared memory region that the primary process used
+ * @param sb           Superblock metadata
+ * @param mountpoint   Mountpoint of the file system
+ * @param out          Output pointer for the constructed xal
+ *
+ * @return On success, 0. On error, negative errno.
+ */
+int
+xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoint, struct xal **out);
 
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode);

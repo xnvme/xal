@@ -69,64 +69,12 @@ xal_inode_idx(struct xal *xal, struct xal_inode *inode)
 	return (uint32_t)(inode - (struct xal_inode *)xal->inodes.memory);
 }
 
-int
-xal_from_pools(const struct xal_sb *sb, const char *mountpoint, void *inodes_mem,
-	void *extents_mem, _Atomic bool *dirty, struct xal **out)
-{
-	struct xal *xal;
-
-	xal = calloc(1, sizeof(*xal));
-	if (!xal) {
-		return -ENOMEM;
-	}
-
-	if (!dirty) {
-		free(xal);
-		return -EINVAL;
-	}
-
-	xal->sb = *sb;
-	xal->root_idx = 0;
-	xal->shared_view = true;
-	xal->dirty = dirty;
-
-	if (mountpoint) {
-		struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
-		be->base.type = XAL_BACKEND_FIEMAP;
-		be->base.close = xal_be_fiemap_close;
-		be->mountpoint = strdup(mountpoint);
-		if (!be->mountpoint) {
-			free(xal);
-			return -ENOMEM;
-		}
-	}
-
-	xal->inodes.memory = inodes_mem;
-	xal->inodes.element_size = sizeof(struct xal_inode);
-
-	xal->extents.memory = extents_mem;
-	xal->extents.element_size = sizeof(struct xal_extent);
-
-	*out = xal;
-
-	return 0;
-}
-
 void
 xal_close(struct xal *xal)
 {
 	struct xal_backend_base *be;
 
 	if (!xal) {
-		return;
-	}
-
-	if (xal->shared_view) {
-		be = (struct xal_backend_base *)&xal->be;
-		if (be->close) {
-			be->close(xal);
-		}
-		free(xal);
 		return;
 	}
 
@@ -382,6 +330,153 @@ uint32_t
 xal_get_sb_blocksize(struct xal *xal)
 {
 	return xal->sb.blocksize;
+}
+
+int
+xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoint, struct xal **out)
+{
+	struct xal *xal;
+	struct stat st;
+	char shm_name_inodes[128], shm_name_extents[128], shm_name_dirty[128];
+	size_t inodes_size, extents_size;
+	_Atomic bool *dirty;
+	void *inodes_mem, *extents_mem;
+	int shm_fd = -1, err;
+
+	xal = calloc(1, sizeof(*xal));
+	if (!xal) {
+		return -ENOMEM;
+	}
+
+	xal->sb = *sb;
+	xal->root_idx = 0;
+	xal->shared_view = true;
+
+	snprintf(shm_name_inodes, sizeof(shm_name_inodes), "%s_inodes", shm_name);
+	snprintf(shm_name_extents, sizeof(shm_name_extents), "%s_extents", shm_name);
+	snprintf(shm_name_dirty, sizeof(shm_name_dirty), "%s_dirty", shm_name);
+
+	/* DIRTY */
+	shm_fd = shm_open(shm_name_dirty, O_RDONLY, 0);
+	if (shm_fd < 0) {
+		err = -errno;
+		fprintf(stderr, "Failed: shm_open(dirty); err(%d)\n", err);
+		goto failed;
+	}
+
+	dirty = mmap(NULL, sizeof(atomic_bool), PROT_READ, MAP_SHARED, shm_fd, 0);
+
+	close(shm_fd);
+	shm_fd = -1;
+
+	if (dirty == MAP_FAILED) {
+		err = -errno;
+		fprintf(stderr, "Failed: mmap(dirty); err(%d)\n", err);
+		goto failed;
+	}
+
+	xal->dirty = dirty;
+
+	if (atomic_load(xal->dirty)) {
+		err = -EINVAL;
+		goto unmap_dirty;
+	}
+
+	/* INODES */
+	shm_fd = shm_open(shm_name_inodes, O_RDONLY, 0);
+	if (shm_fd < 0) {
+		err = -errno;
+		fprintf(stderr, "Failed: shm_open(inodes); err(%d)\n", err);
+		goto unmap_dirty;
+	}
+
+	err = fstat(shm_fd, &st);
+	if (err) {
+		err = -errno;
+		fprintf(stderr, "Failed: fstat(inodes); err(%d)\n", err);
+		goto unmap_dirty;
+	}
+
+	inodes_size = st.st_size;
+	inodes_mem = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, shm_fd, 0);
+
+	close(shm_fd);
+	shm_fd = -1;
+
+	if (inodes_mem == MAP_FAILED) {
+		err = -errno;
+		fprintf(stderr, "Failed: mmap(inodes); err(%d)\n", err);
+		goto unmap_dirty;
+	}
+
+	xal->inodes.memory = inodes_mem;
+	xal->inodes.element_size = sizeof(struct xal_inode);
+	xal->inodes.reserved = inodes_size / xal->inodes.element_size;
+
+	/* EXTENTS */
+	shm_fd = shm_open(shm_name_extents, O_RDONLY, 0);
+	if (shm_fd < 0) {
+		err = -errno;
+		fprintf(stderr, "Failed: shm_open(extents); err(%d)\n", err);
+		goto unmap_inodes;
+	}
+
+	err = fstat(shm_fd, &st);
+	if (err) {
+		err = -errno;
+		fprintf(stderr, "Failed: fstat(extents); err(%d)\n", err);
+		goto unmap_inodes;
+	}
+
+	extents_size = st.st_size;
+	extents_mem = mmap(NULL, extents_size, PROT_READ, MAP_SHARED, shm_fd, 0);
+
+	close(shm_fd);
+	shm_fd = -1;
+
+	if (extents_mem == MAP_FAILED) {
+		err = -errno;
+		fprintf(stderr, "Failed: mmap(extents); err(%d)\n", err);
+		goto unmap_inodes;
+	}
+
+	xal->extents.memory = extents_mem;
+	xal->extents.element_size = sizeof(struct xal_extent);
+	xal->extents.reserved = extents_size / xal->extents.element_size;
+
+	if (mountpoint) {
+		struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
+		be->base.type = XAL_BACKEND_FIEMAP;
+		be->base.close = xal_be_fiemap_close;
+		be->mountpoint = strdup(mountpoint);
+		if (!be->mountpoint) {
+			err = -ENOMEM;
+			goto unmap_extents;
+		}
+	} else {
+		struct xal_be_xfs *be = (struct xal_be_xfs *)&xal->be;
+		be->base.type = XAL_BACKEND_XFS;
+		be->base.close = xal_be_xfs_close;
+	}
+
+	*out = xal;
+
+	return 0;
+
+unmap_extents:
+	munmap(extents_mem, extents_size);
+unmap_inodes:
+	munmap(inodes_mem, inodes_size);
+unmap_dirty:
+	munmap(dirty, sizeof(atomic_bool));
+failed:
+	free(xal);
+
+	if (shm_fd >= 0) {
+		close(shm_fd);
+	}
+
+	return err;
 }
 
 int

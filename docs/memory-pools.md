@@ -37,7 +37,7 @@ The process that opened xal with ``shm_name`` set is responsible for calling
 ``shm_unlink()`` on both objects when they are no longer needed.
 ``xal_close()`` will ``munmap`` the regions but will not unlink them.
 
-## Consumer processes: ``xal_from_pools()``
+## Consumer processes: ``xal_from_shm()``
 
 A secondary process that needs read-only access to an already-indexed pool can
 attach to the shared memory objects directly, without opening the device or
@@ -48,18 +48,15 @@ re-running ``xal_index()``. The typical pattern is:
    superblock (via ``xal_get_sb()``) to the other process, for example
    through a Unix socket or another shared memory region.
 
-2. The other process maps both shared memory objects with ``shm_open()`` and
-   ``mmap(MAP_SHARED)``.
-
-3. It then calls ``xal_from_pools()`` with the received superblock and the
-   two mapped memory regions to obtain a read-only ``struct xal *``::
+2. It then calls ``xal_from_shm()`` with the received superblock and shared
+   memory region name to obtain a read-only ``struct xal *``::
 
       const struct xal_sb *sb = /* superblock communicated OOB */;
-      void *inodes_mem = /* mmap of /myapp_xal_inodes */;
-      void *extents_mem = /* mmap of /myapp_xal_extents */;
+      const char *shm_name = /* shared memory region name */;
+      const char *mountpoint = /* mountpoint of block device, if opened with FIEMAP backend */;
       struct xal *view;
 
-      xal_from_pools(sb, NULL, inodes_mem, extents_mem, &view);
+      xal_from_shm(shm_name, sb, mountpoint, &view);
       xal_walk(view, xal_get_root(view), my_callback, NULL);
       xal_close(view); /* frees the struct; does NOT munmap or unlink */
 
