@@ -575,34 +575,33 @@ compare_name_to_inode(const void *key, const void *elem)
 }
 
 int
-search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, struct xal_inode **inode)
+search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode)
 {
-	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
 	struct xal_inode *search, *found = NULL;
 	char *search_begin, *search_end;
-	size_t mountpoint_len;
+	size_t basepath_len;
 
-	mountpoint_len = strlen(be->mountpoint);
+	basepath_len = strlen(basepath);
 
 	if (!root) {
 		XAL_DEBUG("FAILED: no xal->root, call xal_index()");
 		return -EINVAL;
 	}
 
-	if (strlen(path) <= mountpoint_len + 1) {
+	if (strlen(path) <= basepath_len + 1) {
 		XAL_DEBUG("FAILED: Not a valid path(%s); path too short; must be absolute path to entry in mountpoint(%s)",
-			path, be->mountpoint);
+			path, basepath);
 		return -EINVAL;
 	}
 
-	if (strncmp(path, be->mountpoint, mountpoint_len) != 0) {
+	if (strncmp(path, basepath, basepath_len) != 0) {
 		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; must be absolute path to entry in mountpoint(%s)",
-			path, be->mountpoint);
+			path, basepath);
 		return -EINVAL;
 	}
 
 	search = root;
-	search_begin = path + mountpoint_len + 1;
+	search_begin = path + basepath_len + 1;
 	search_end = strchr(search_begin, '/');
 
 	while (!found) {
@@ -664,8 +663,7 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 
 	switch (be->type) {
 	case XAL_BACKEND_XFS:
-		XAL_DEBUG("Failed: xal_get_inode() not supported for XFS backend");
-		return -ENOSYS;
+		return search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, "", inode);
 	case XAL_BACKEND_FIEMAP:
 		return xal_be_fiemap_get_inode(xal, path, inode);
 	default:
