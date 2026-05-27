@@ -16,9 +16,16 @@ struct xal_backend_base {
 	void (*close)(struct xal *xal);
 };
 
+struct xal_shared_state {
+	enum xal_backend type;
+	struct xal_sb sb;
+	char mountpoint[XAL_PATH_MAXLEN];
+	atomic_bool dirty;
+};
+
 /**
  * XAL
- * 
+ *
  * Contains a handle to the storage device along with meta-data describing the data-layout and a
  * pool of inodes.
  *
@@ -32,7 +39,9 @@ struct xal {
 	struct xal_sb sb;
 	uint8_t be[XAL_BACKEND_SIZE];
 	atomic_bool *dirty;      ///< Whether the file system has changed since last index; may point to external shared memory
-	atomic_bool _dirty_storage; ///< Backing store for dirty when no external pointer is provided
+	atomic_bool _dirty_storage; ///< Backing store for dirty when shm_name is not set
 	atomic_int seq_lock;     ///< An uneven number indicates the struct is being modified and is not safe to read
 	bool shared_view;        ///< If true, pool memory is owned externally; xal_close() will not unmap it
+	struct xal_shared_state *state; ///< Mapped shared state region; non-NULL when shm_name was set
+	char *state_shm_name;           ///< Name of the _state shm region; set by primary only, for unlink on close
 };

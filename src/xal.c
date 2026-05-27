@@ -81,8 +81,12 @@ xal_close(struct xal *xal)
 	xal_pool_unmap(&xal->inodes, !xal->shared_view);
 	xal_pool_unmap(&xal->extents, !xal->shared_view);
 
-	if (xal->dirty != &xal->_dirty_storage) {
-		munmap(xal->dirty, sizeof(atomic_bool));
+	if (xal->state) {
+		if (xal->state_shm_name) {
+			shm_unlink(xal->state_shm_name);
+			free(xal->state_shm_name);
+		}
+		munmap(xal->state, sizeof(struct xal_shared_state));
 	}
 
 	be = (struct xal_backend_base *)&xal->be;
@@ -194,39 +198,6 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 
 	(*xal)->dev = dev;
 
-	if (opts->shm_name) {
-		char shm_name[XAL_PATH_MAXLEN + 9];
-		int fd;
-		void *mem;
-
-		snprintf(shm_name, sizeof(shm_name), "%s_dirty", opts->shm_name);
-
-		fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
-		if (fd < 0) {
-			XAL_DEBUG("FAILED: shm_open(%s); errno(%d)", shm_name, errno);
-			xal_close(*xal);
-			return -errno;
-		}
-
-		err = ftruncate(fd, sizeof(atomic_bool));
-		if (err) {
-			XAL_DEBUG("FAILED: ftruncate(); errno(%d)", errno);
-			close(fd);
-			xal_close(*xal);
-			return -errno;
-		}
-
-		mem = mmap(NULL, sizeof(atomic_bool), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-		close(fd);
-		if (mem == MAP_FAILED) {
-			XAL_DEBUG("FAILED: mmap(); errno(%d)", errno);
-			xal_close(*xal);
-			return -errno;
-		}
-
-		(*xal)->dirty = mem;
-	}
-
 	ns = xnvme_dev_get_ns(dev);
 	if (!ns) {
 		err = -errno;
@@ -240,6 +211,53 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 	}
 
 	(*xal)->sb.lba_blksze = 1U << ns->lbaf[fidx].ds;
+
+	if (opts->shm_name) {
+		char shm_name_state[XAL_PATH_MAXLEN + 9];
+		struct xal_shared_state *state;
+		int fd;
+
+		snprintf(shm_name_state, sizeof(shm_name_state), "%s_state", opts->shm_name);
+
+		fd = shm_open(shm_name_state, O_CREAT | O_RDWR, 0666);
+		if (fd < 0) {
+			XAL_DEBUG("FAILED: shm_open(%s); errno(%d)", shm_name_state, errno);
+			xal_close(*xal);
+			return -errno;
+		}
+
+		err = ftruncate(fd, sizeof(struct xal_shared_state));
+		if (err) {
+			XAL_DEBUG("FAILED: ftruncate(); errno(%d)", errno);
+			close(fd);
+			xal_close(*xal);
+			return -errno;
+		}
+
+		state = mmap(NULL, sizeof(struct xal_shared_state), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+		close(fd);
+		if (state == MAP_FAILED) {
+			XAL_DEBUG("FAILED: mmap(); errno(%d)", errno);
+			xal_close(*xal);
+			return -errno;
+		}
+
+		(*xal)->state_shm_name = strdup(shm_name_state);
+		if (!(*xal)->state_shm_name) {
+			XAL_DEBUG("FAILED: strdup(); errno(%d)", errno);
+			munmap(state, sizeof(struct xal_shared_state));
+			xal_close(*xal);
+			return -ENOMEM;
+		}
+
+		(*xal)->state = state;
+		(*xal)->dirty = &state->dirty;
+
+		state->type = opts->be;
+		state->sb = (*xal)->sb;
+		strncpy(state->mountpoint, mountpoint, XAL_PATH_MAXLEN - 1);
+		state->mountpoint[XAL_PATH_MAXLEN - 1] = '\0';
+	}
 
 	return 0;
 }
@@ -333,13 +351,13 @@ xal_get_sb_blocksize(struct xal *xal)
 }
 
 int
-xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoint, struct xal **out)
+xal_from_shm(const char *shm_name, struct xal **out)
 {
 	struct xal *xal;
+	struct xal_shared_state *state;
 	struct stat st;
-	char shm_name_inodes[128], shm_name_extents[128], shm_name_dirty[128];
+	char shm_name_inodes[128], shm_name_extents[128], shm_name_state[128];
 	size_t inodes_size, extents_size;
-	_Atomic bool *dirty;
 	void *inodes_mem, *extents_mem;
 	int shm_fd = -1, err;
 
@@ -348,38 +366,37 @@ xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoi
 		return -ENOMEM;
 	}
 
-	xal->sb = *sb;
-	xal->root_idx = 0;
 	xal->shared_view = true;
 
 	snprintf(shm_name_inodes, sizeof(shm_name_inodes), "%s_inodes", shm_name);
 	snprintf(shm_name_extents, sizeof(shm_name_extents), "%s_extents", shm_name);
-	snprintf(shm_name_dirty, sizeof(shm_name_dirty), "%s_dirty", shm_name);
+	snprintf(shm_name_state, sizeof(shm_name_state), "%s_state", shm_name);
 
-	/* DIRTY */
-	shm_fd = shm_open(shm_name_dirty, O_RDONLY, 0);
+	/* STATE */
+	shm_fd = shm_open(shm_name_state, O_RDONLY, 0);
 	if (shm_fd < 0) {
 		err = -errno;
-		fprintf(stderr, "Failed: shm_open(dirty); err(%d)\n", err);
+		fprintf(stderr, "Failed: shm_open(state); err(%d)\n", err);
 		goto failed;
 	}
 
-	dirty = mmap(NULL, sizeof(atomic_bool), PROT_READ, MAP_SHARED, shm_fd, 0);
-
+	state = mmap(NULL, sizeof(struct xal_shared_state), PROT_READ, MAP_SHARED, shm_fd, 0);
 	close(shm_fd);
 	shm_fd = -1;
 
-	if (dirty == MAP_FAILED) {
+	if (state == MAP_FAILED) {
 		err = -errno;
-		fprintf(stderr, "Failed: mmap(dirty); err(%d)\n", err);
+		fprintf(stderr, "Failed: mmap(state); err(%d)\n", err);
 		goto failed;
 	}
 
-	xal->dirty = dirty;
+	xal->state = state;
+	xal->dirty = &state->dirty;
+	xal->sb = state->sb;
 
 	if (atomic_load(xal->dirty)) {
 		err = -EINVAL;
-		goto unmap_dirty;
+		goto unmap_state;
 	}
 
 	/* INODES */
@@ -387,26 +404,25 @@ xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoi
 	if (shm_fd < 0) {
 		err = -errno;
 		fprintf(stderr, "Failed: shm_open(inodes); err(%d)\n", err);
-		goto unmap_dirty;
+		goto unmap_state;
 	}
 
 	err = fstat(shm_fd, &st);
 	if (err) {
 		err = -errno;
 		fprintf(stderr, "Failed: fstat(inodes); err(%d)\n", err);
-		goto unmap_dirty;
+		goto unmap_state;
 	}
 
 	inodes_size = st.st_size;
 	inodes_mem = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, shm_fd, 0);
-
 	close(shm_fd);
 	shm_fd = -1;
 
 	if (inodes_mem == MAP_FAILED) {
 		err = -errno;
 		fprintf(stderr, "Failed: mmap(inodes); err(%d)\n", err);
-		goto unmap_dirty;
+		goto unmap_state;
 	}
 
 	xal->inodes.memory = inodes_mem;
@@ -430,7 +446,6 @@ xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoi
 
 	extents_size = st.st_size;
 	extents_mem = mmap(NULL, extents_size, PROT_READ, MAP_SHARED, shm_fd, 0);
-
 	close(shm_fd);
 	shm_fd = -1;
 
@@ -444,11 +459,11 @@ xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoi
 	xal->extents.element_size = sizeof(struct xal_extent);
 	xal->extents.reserved = extents_size / xal->extents.element_size;
 
-	if (mountpoint) {
+	if (state->type == XAL_BACKEND_FIEMAP) {
 		struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
 		be->base.type = XAL_BACKEND_FIEMAP;
 		be->base.close = xal_be_fiemap_close;
-		be->mountpoint = strdup(mountpoint);
+		be->mountpoint = strdup(state->mountpoint);
 		if (!be->mountpoint) {
 			err = -ENOMEM;
 			goto unmap_extents;
@@ -467,8 +482,8 @@ unmap_extents:
 	munmap(extents_mem, extents_size);
 unmap_inodes:
 	munmap(inodes_mem, inodes_size);
-unmap_dirty:
-	munmap(dirty, sizeof(atomic_bool));
+unmap_state:
+	munmap(state, sizeof(struct xal_shared_state));
 failed:
 	free(xal);
 

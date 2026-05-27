@@ -38,21 +38,24 @@ shared memory filesystem (``/dev/shm`` on Linux) until explicitly removed.
 
 A secondary process that needs read-only access to an already-indexed pool can
 attach to the shared memory objects directly, without opening the device or
-re-running ``xal_index()``. The typical pattern is:
+re-running ``xal_index()``. All metadata (superblock, backend type, mountpoint,
+root inode index) is read from a dedicated ``_state`` shared memory region
+created by the primary; no out-of-band communication is needed beyond the base
+shared memory name.
+
+The typical pattern is:
 
 1. One process calls ``xal_open()`` with ``shm_name`` set and runs
-   ``xal_index()``. It then communicates the shared memory names and the
-   superblock (via ``xal_get_sb()``) to the other process, for example
-   through a Unix socket or another shared memory region.
+   ``xal_index()``. The shared memory name must be communicated to the
+   secondary process, for example through a command-line argument or
+   environment variable.
 
-2. It then calls ``xal_from_shm()`` with the received superblock and shared
-   memory region name to obtain a read-only ``struct xal *``::
+2. The secondary calls ``xal_from_shm()`` with that name to obtain a
+   read-only ``struct xal *``::
 
-      const struct xal_sb *sb = /* superblock communicated OOB */;
-      const char *shm_name = /* shared memory region name */;
-      const char *mountpoint = /* mountpoint of block device, if opened with FIEMAP backend */;
+      const char *shm_name = /* shared memory base name */;
       struct xal *view;
 
-      xal_from_shm(shm_name, sb, mountpoint, &view);
+      xal_from_shm(shm_name, &view);
       xal_walk(view, xal_get_root(view), my_callback, NULL);
       xal_close(view);

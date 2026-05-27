@@ -333,22 +333,21 @@ uint64_t
 xal_fsbno_offset(struct xal *xal, uint64_t fsbno);
 
 /**
- * Construct a read-only xal from externally provided shared memory.
+ * Construct a read-only xal from shared memory created by a primary process.
  *
  * Intended for multi-process support, where a primary process has built the xal tree with
- * opts->shm_name set.
+ * opts->shm_name set and called xal_index(). All metadata (superblock, backend type, mountpoint,
+ * root index) is read from the shared state region; no out-of-band communication is required.
  * The resulting xal can be closed with xal_close(), which will free the struct xal allocation and
- * munmap the pool memory regions.
+ * munmap the shared memory regions.
  *
- * @param shm_name	   ID for shared memory region that the primary process used
- * @param sb           Superblock metadata
- * @param mountpoint   Mountpoint of the file system
+ * @param shm_name	   Base name for the shared memory regions (same value as opts->shm_name)
  * @param out          Output pointer for the constructed xal
  *
  * @return On success, 0. On error, negative errno.
  */
 int
-xal_from_shm(const char *shm_name, const struct xal_sb *sb, const char *mountpoint, struct xal **out);
+xal_from_shm(const char *shm_name, struct xal **out);
 
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode);
