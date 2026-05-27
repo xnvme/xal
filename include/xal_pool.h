@@ -13,11 +13,12 @@ struct xal_pool {
 	size_t growby;	     ///< Number of reserved elements to allocate at a time
 	size_t free;	     ///< Index / position of the next free element
 	size_t element_size; ///< Size of a single element in bytes
+	char *shm_name;      ///< Name of shared memory region, may be NULL
 	void *memory;	     ///< Memory space for elements
 };
 
 int
-xal_pool_unmap(struct xal_pool *pool);
+xal_pool_unmap(struct xal_pool *pool, bool unlink);
 
 /**
  * Initialize the given pool of 'struct xal_inode'
@@ -32,8 +33,7 @@ xal_pool_unmap(struct xal_pool *pool);
  *
  * If shm_name is NULL, uses private anonymous memory with lazy mprotect growth.
  * If shm_name is non-NULL, backs the pool with a POSIX shared memory object of that name.
- * In the shm case the full reserved size is committed upfront and the caller is responsible
- * for shm_unlink() when the shm is no longer needed.
+ * In the shm case the full reserved size is committed upfront.
  */
 int
 xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t element_size,
