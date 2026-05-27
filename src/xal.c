@@ -78,8 +78,8 @@ xal_close(struct xal *xal)
 		return;
 	}
 
-	xal_pool_unmap(&xal->inodes);
-	xal_pool_unmap(&xal->extents);
+	xal_pool_unmap(&xal->inodes, !xal->shared_view);
+	xal_pool_unmap(&xal->extents, !xal->shared_view);
 
 	if (xal->dirty != &xal->_dirty_storage) {
 		munmap(xal->dirty, sizeof(atomic_bool));

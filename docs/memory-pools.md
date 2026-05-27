@@ -33,9 +33,6 @@ respectively::
 In this mode the full reserved size is committed upfront via ``ftruncate()``
 and ``mmap(MAP_SHARED)``; there is no lazy growth. The objects persist in the
 shared memory filesystem (``/dev/shm`` on Linux) until explicitly removed.
-The process that opened xal with ``shm_name`` set is responsible for calling
-``shm_unlink()`` on both objects when they are no longer needed.
-``xal_close()`` will ``munmap`` the regions but will not unlink them.
 
 ## Consumer processes: ``xal_from_shm()``
 
@@ -58,10 +55,4 @@ re-running ``xal_index()``. The typical pattern is:
 
       xal_from_shm(shm_name, sb, mountpoint, &view);
       xal_walk(view, xal_get_root(view), my_callback, NULL);
-      xal_close(view); /* frees the struct; does NOT munmap or unlink */
-
-The resulting ``struct xal`` has ``shared_view`` set to ``true``.
-``xal_close()`` on a shared view frees only the ``struct xal`` allocation;
-the pool memory regions are left mapped and must be unmapped by the caller.
-The process that created the shared memory objects is responsible for
-``shm_unlink()``.
+      xal_close(view);

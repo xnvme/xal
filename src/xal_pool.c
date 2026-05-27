@@ -10,9 +10,27 @@
 #include <xal_pool.h>
 
 int
-xal_pool_unmap(struct xal_pool *pool)
+xal_pool_unmap(struct xal_pool *pool, bool unlink)
 {
-	return munmap(pool->memory, pool->reserved * pool->element_size);
+	int err;
+	
+	err = munmap(pool->memory, pool->reserved * pool->element_size);
+	if (err < 0) {
+		err = -errno;
+		XAL_DEBUG("FAILED: mprotmunmapect(...); errno(%d)", errno);
+		return err;
+	}
+
+	if (pool->shm_name && unlink) {
+		err = shm_unlink(pool->shm_name);
+		if (err < 0) {
+			err = -errno;
+			XAL_DEBUG("FAILED: shm_unlink(...); errno(%d)", errno);
+			return err;
+		}
+	}
+
+	return 0;
 }
 
 int
@@ -71,10 +89,16 @@ xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t el
 			XAL_DEBUG("FAILED: mmap(); errno(%d)", errno);
 			return -errno;
 		}
-
 		memset(pool->memory, 0, nbytes);
+
 		pool->allocated = reserved;
 		pool->growby = reserved;
+		
+		pool->shm_name = strdup(shm_name);
+		if (!pool->shm_name) {
+			XAL_DEBUG("FAILED: strdup(); errbo(%d)", errno);
+			return -errno;
+		}
 	} else {
 		if (allocated > reserved) {
 			XAL_DEBUG("FAILED: xal_pool_map(...); errno(%d)", EINVAL);
@@ -94,7 +118,7 @@ xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t el
 		err = xal_pool_grow(pool, allocated);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_pool_grow(...); err(%d)", err);
-			xal_pool_unmap(pool);
+			xal_pool_unmap(pool, false);
 			return err;
 		}
 	}
