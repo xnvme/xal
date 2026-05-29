@@ -341,6 +341,10 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno);
  * The resulting xal can be closed with xal_close(), which will free the struct xal allocation and
  * munmap the shared memory regions.
  *
+ * Calling xal_get_inode(), xal_get_extents() or xal_get_dentries() on the returned xal struct
+ * will always result in it using the XAL_FILE_LOOKUPMODE_TRAVERSE. To get constant time lookups
+ * with the XAL_FILE_LOOKUPMODE_HASHMAP mode, call xal_build_lookup_hashmap() before.
+ *
  * @param shm_name	   Base name for the shared memory regions (same value as opts->shm_name)
  * @param out          Output pointer for the constructed xal
  *
