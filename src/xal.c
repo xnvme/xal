@@ -152,14 +152,24 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 		return -EINVAL;
 	}
 
+	if (opts->mountpoint && strlen(opts->mountpoint)) {
+		strncpy(mountpoint, opts->mountpoint, XAL_PATH_MAXLEN);
+		mountpoint[XAL_PATH_MAXLEN] = '\0';
+	}
+
 	if (!opts->be) {
-		err = retrieve_mountpoint(ident->uri, mountpoint);
-		if (err) {
-			XAL_DEBUG("INFO: Failed retrieve_mountpoint(), this is OK");
-			opts->be = XAL_BACKEND_XFS;
-			err = 0;
+		if (!strlen(mountpoint)) {
+			err = retrieve_mountpoint(ident->uri, mountpoint);
+			if (err) {
+				XAL_DEBUG("INFO: Failed retrieve_mountpoint(), this is OK, setting backend to XFS");
+				opts->be = XAL_BACKEND_XFS;
+				err = 0;
+			} else {
+				XAL_DEBUG("INFO: dev(%s) mounted at path(%s), setting backend to FIEMAP", ident->uri, mountpoint);
+				opts->be = XAL_BACKEND_FIEMAP;
+			}
 		} else {
-			XAL_DEBUG("INFO: dev(%s) mounted at path(%s)", ident->uri, mountpoint);
+			XAL_DEBUG("INFO: given mountpoint at path(%s), setting backend to FIEMAP", mountpoint);
 			opts->be = XAL_BACKEND_FIEMAP;
 		}
 	}

@@ -58,6 +58,7 @@ struct xal_opts {
 	enum xal_backend be;
 	enum xal_watchmode watch_mode;
 	enum xal_file_lookupmode file_lookupmode;
+	const char *mountpoint;
 	const char *shm_name; ///< If set, pool memory is backed by POSIX shared memory with this base name, see @xal_from_pools() for sharing the pools across processes
 };
 
