@@ -23,6 +23,9 @@ Dependencies:
 
 - `xnvme` >= 0.7.0 -- must be installed and visible to `pkg-config`
 - `librt`
+- `libbpf`, `libelf`, `zlib` (for the BPF event listener)
+- `clang`, `llvm`, and `bpftool` (to compile BPF objects and generate skeletons)
+- A kernel exposing BTF at `/sys/kernel/btf/vmlinux` (i.e. built with `CONFIG_DEBUG_INFO_BTF=y`)
 
 The default `make` target runs clean, configure, build, and install in one
 shot:

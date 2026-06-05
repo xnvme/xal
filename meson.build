@@ -55,11 +55,28 @@ vmlinux_h = custom_target(
   capture : true
 )
 
+# BPF: map host cpu_family() to the __TARGET_ARCH_* macro libbpf expects
+bpf_arch_map = {
+  'x86_64'  : 'x86',
+  'x86'     : 'x86',
+  'aarch64' : 'arm64',
+  'arm'     : 'arm',
+  'ppc64'   : 'powerpc',
+  'riscv64' : 'riscv',
+  's390x'   : 's390',
+  'mips64'  : 'mips',
+  'mips'    : 'mips',
+}
+bpf_cpu = host_machine.cpu_family()
+if not bpf_arch_map.has_key(bpf_cpu)
+  error('Unsupported BPF target arch: ' + bpf_cpu)
+endif
+
 # BPF: compile flags
 bpf_cflags = [
   '-O2', '-g',
   '-target', 'bpf',
-  '-D__TARGET_ARCH_x86',
+  '-D__TARGET_ARCH_' + bpf_arch_map[bpf_cpu],
   '-I' + meson.current_build_dir(),
   '-I' + meson.current_source_dir() / 'src',
   '-I' + meson.current_source_dir() / 'include',
@@ -114,7 +131,7 @@ sources = files(
   'src/utils.c'
 )
 
-include_dirs = include_directories('include', 'tp', '.')
+include_dirs = include_directories('include', 'tp')
 
 xal_library = library('xal',
   sources: [skel, sources],
