@@ -40,7 +40,7 @@ xal_be_fiemap_close(struct xal *xal)
 		return;
 	}
 
-	be = (struct xal_be_fiemap *)xal->be;
+	be = (struct xal_be_fiemap *)&xal->be;
 
 	if (be->inotify) {
 		xal_be_fiemap_inotify_close(be->inotify);

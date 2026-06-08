@@ -188,10 +188,15 @@ xal_be_xfs_close(struct xal *xal)
 		return;
 	}
 
-	be = (struct xal_be_xfs *)xal->be;
+	be = (struct xal_be_xfs *)&xal->be;
 
-	xnvme_buf_free(xal->dev, be->buf);
-	kh_destroy(ino_to_dinode, be->dinodes_map);
+	if (xal->dev && be->buf) {
+		xnvme_buf_free(xal->dev, be->buf);
+	}
+
+	if (be->dinodes_map) {
+		kh_destroy(ino_to_dinode, be->dinodes_map);
+	}
 	free(be->dinodes);
 }
 
