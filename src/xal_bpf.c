@@ -68,7 +68,7 @@ xal_be_fiemap_bpf_rb_init(struct xal *xal, struct xal_bpf *bpf)
 	rb = ring_buffer__new(bpf_map__fd(bpf->skel->maps.events), handle_event, xal, NULL);
 	if (!rb) {
 		err = -errno;
-		XAL_DEBUG("FAILD: ring_buffer__new(); err(%d)", err);
+		XAL_DEBUG("FAILED: ring_buffer__new(); err(%d)", err);
 		goto out;
 	}
 
@@ -152,20 +152,13 @@ xal_be_fiemap_bpf_close(struct xal_bpf *bpf)
 	return;
 }
 
-static int
-read_stats(struct xal_bpf_events *skel, struct xal_bpf_stat *out)
-{
-	*out = skel->bss->stats;
-	return 0;
-}
-
 static void *
 background_bpf_poll(void *arg)
 {
 	struct xal *xal = arg;
 	struct xal_be_fiemap *be = (struct xal_be_fiemap *)xal->be;
 	struct xal_bpf *bpf = be->bpf;
-	struct xal_bpf_stat st;
+	uint64_t last_lost_events = 0;
 	int err = 0;
 
 	XAL_DEBUG("INFO: starting background bpf poll thread");
@@ -178,8 +171,14 @@ background_bpf_poll(void *arg)
 		}
 
 		err = 0;
-		if (read_stats(bpf->skel, &st) == 0) {
-			// check stats for lost events
+		uint64_t current_lost = __atomic_load_n(&bpf->skel->bss->stats.lost_events, __ATOMIC_RELAXED);
+		if (current_lost > last_lost_events) {
+			XAL_DEBUG("WARNING: missed %lu BPF events! Marking cache as dirty for safety.",
+				  current_lost - last_lost_events);
+			if (xal && xal->dirty) {
+				atomic_store(xal->dirty, true);
+			}
+			last_lost_events = current_lost;
 		}
 	}
 
