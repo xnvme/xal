@@ -251,7 +251,7 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		}
 		close(fd);
 
-		err = xal_be_fiemap_bpf_rb_init(be->bpf);
+		err = xal_be_fiemap_bpf_rb_init(cand, be->bpf);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_be_fiemap_bpf_rb_init(); err(%d)", err);
 			goto failed;
