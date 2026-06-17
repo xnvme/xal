@@ -14,7 +14,7 @@ struct xal_bpf {
 };
 
 int
-xal_be_fiemap_bpf_rb_init(struct xal_bpf *bpf);
+xal_be_fiemap_bpf_rb_init(struct xal *xal, struct xal_bpf *bpf);
 
 int
 xal_be_fiemap_bpf_init(struct xal_bpf *bpf);

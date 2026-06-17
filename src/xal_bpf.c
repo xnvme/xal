@@ -26,7 +26,7 @@ static int
 handle_event(void *__ctx, void *__data, size_t len)
 {
 	const struct xal_bpf_event *e = __data;
-	(void)__ctx;
+	struct xal *xal = __ctx;
 
 	if (len < sizeof(*e)) {
 		XAL_DEBUG("FAILED: size of event too small; len(%lu) sizeof(e)(%lu)", len, sizeof(*e));
@@ -37,7 +37,10 @@ handle_event(void *__ctx, void *__data, size_t len)
 	case XAL_FS_UNFREEZE_EVENT:
 		XAL_DEBUG("WARNING: time(%ld) tgid/pid(%d/%d) cpu(%d) thawed the filesystem dev(%d,%d); unsafe to use extents",
 			e->ts_ns, e->tgid, e->pid, e->cpu, e->dev_major, e->dev_minor);
-		// TODO: set dirty
+		if (xal && xal->dirty) {
+			atomic_store(xal->dirty, true);
+			XAL_DEBUG("WARNING: setting xal->dirty to true");
+		}
 		break;
 	default:
 		break;
@@ -47,7 +50,7 @@ handle_event(void *__ctx, void *__data, size_t len)
 }
 
 int
-xal_be_fiemap_bpf_rb_init(struct xal_bpf *bpf)
+xal_be_fiemap_bpf_rb_init(struct xal *xal, struct xal_bpf *bpf)
 {
 	struct ring_buffer *rb;
 	int err;
@@ -62,7 +65,7 @@ xal_be_fiemap_bpf_rb_init(struct xal_bpf *bpf)
 		ring_buffer__free(bpf->rb);
 	}
 
-	rb = ring_buffer__new(bpf_map__fd(bpf->skel->maps.events), handle_event, NULL, NULL);
+	rb = ring_buffer__new(bpf_map__fd(bpf->skel->maps.events), handle_event, xal, NULL);
 	if (!rb) {
 		err = -errno;
 		XAL_DEBUG("FAILD: ring_buffer__new(); err(%d)", err);
