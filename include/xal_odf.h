@@ -27,6 +27,15 @@
 typedef uint64_t xfs_ino_t;
 typedef uint32_t xfs_nlink_t; // NOTE: This is defined as '__u32'
 
+// xfs_types.h tags on-disk structs with '__packed', a macro normally provided
+// by a linux header. When absent the token is parsed as a tentative variable
+// definition emitted into every translation unit, breaking linking with
+// "multiple definition of '__packed'" under the -fno-common default of modern
+// toolchains. Provide the packed attribute so the structs keep their layout.
+#ifndef __packed
+#define __packed __attribute__((packed))
+#endif
+
 #include <xfs/xfs_types.h>
 
 /**
