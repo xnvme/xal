@@ -1313,8 +1313,11 @@ process_dinode_dir_local(struct xal *xal, struct xal_odf_dinode *dinode, struct 
 		dentry->ftype = *cursor;
 		cursor += 1; ///< Advance past 'ftype'
 
+		/**
+		 * A non-zero 'i8count' means every inode number in the directory --
+		 * including the parent above -- is 64-bit; otherwise all are 32-bit.
+		 */
 		if (i8count) {
-			i8count--;
 			dentry->ino = be64toh(*(uint64_t *)cursor);
 			cursor += 8; ///< Advance past 64-bit inode number
 		} else {
