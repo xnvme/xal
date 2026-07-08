@@ -27,6 +27,277 @@
 
 KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
 
+/** Basename prefix of the per-session reflink shadow directory: <mnt>/.xal_snapshot.<pid> */
+#define XAL_SNAPSHOT_PREFIX ".xal_snapshot."
+
+/** Max length of a "<dir>/<entry>" path assembled under the shadow directory. */
+#define XAL_SNAPSHOT_ENTRY_MAXLEN (XAL_PATH_MAXLEN + 64)
+
+/**
+ * Reflink-snapshot state (XAL_WATCHMODE_REFLINK_SNAPSHOT).
+ *
+ * At index time every regular file (optionally restricted to @subtree) is reflink-cloned into a
+ * private shadow directory. The clone's on-disk inode keeps the shared blocks allocated for the
+ * whole xal session -- so the extents captured from it stay valid even as the origin is rewritten
+ * (writes to the origin divert to new blocks via CoW). The clones are removed at xal_close().
+ */
+struct xal_reflink {
+	char *dir;        ///< Shadow directory holding the clones: <mountpoint>/.xal_snapshot.<pid>
+	char *subtree;    ///< Absolute path prefix restricting which files are reflinked; NULL = all
+	bool dir_created; ///< The shadow directory is created lazily on the first clone
+};
+
+/**
+ * Whether the file at @path is covered by the (optional) subtree restriction.
+ */
+static bool
+reflink_applies(struct xal_reflink *rl, const char *path)
+{
+	size_t n;
+
+	if (!rl->subtree) {
+		return true;
+	}
+
+	n = strlen(rl->subtree);
+
+	return (strncmp(path, rl->subtree, n) == 0) && (path[n] == '\0' || path[n] == '/');
+}
+
+/**
+ * Set or clear the immutable inode flag (FS_IMMUTABLE_FL) on an open fd. Requires
+ * CAP_LINUX_IMMUTABLE; the fd need not be writable (immutable permits read-open).
+ */
+static int
+reflink_chattr_immutable(int fd, bool enable)
+{
+	int attr;
+
+	if (ioctl(fd, FS_IOC_GETFLAGS, &attr) < 0) {
+		return -errno;
+	}
+
+	if (enable) {
+		attr |= FS_IMMUTABLE_FL;
+	} else {
+		attr &= ~FS_IMMUTABLE_FL;
+	}
+
+	if (ioctl(fd, FS_IOC_SETFLAGS, &attr) < 0) {
+		return -errno;
+	}
+
+	return 0;
+}
+
+/**
+ * Remove the (flat) shadow directory and every clone within it. Clones are immutable, so the flag
+ * is cleared before each unlink (may_delete refuses immutable inodes).
+ */
+static void
+reflink_dir_purge(const char *dir)
+{
+	struct dirent *entry;
+	DIR *d;
+
+	d = opendir(dir);
+	if (!d) {
+		return;
+	}
+
+	while ((entry = readdir(d))) {
+		char path[XAL_SNAPSHOT_ENTRY_MAXLEN]; // holds <dir>/<clone-name>
+		int fd;
+
+		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) {
+			continue;
+		}
+		if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) >= (int)sizeof(path)) {
+			XAL_DEBUG("FAILED: clone path truncated under dir(%s); skipping", dir);
+			continue;
+		}
+
+		fd = open(path, O_RDONLY);
+		if (fd >= 0) {
+			int cerr = reflink_chattr_immutable(fd, false);
+
+			if (cerr) {
+				XAL_DEBUG("WARNING: could not clear immutable on clone(%s); err(%d); the "
+					  "unlink below will likely fail", path, cerr);
+			}
+			close(fd);
+		}
+		if (unlink(path) && errno != ENOENT) {
+			XAL_DEBUG("FAILED: unlink(%s); errno(%d); clone may be left behind", path,
+				  errno);
+		}
+	}
+
+	closedir(d);
+	rmdir(dir);
+}
+
+/**
+ * Remove every reflink shadow directory under @mountpoint, including those left by a crashed prior
+ * run of any pid, so orphaned immutable clones do not accumulate. Assumes a single xal instance per
+ * mount; a concurrent instance's live snapshot on the same mount would be swept too.
+ */
+static void
+reflink_sweep_orphans(const char *mountpoint)
+{
+	struct dirent *entry;
+	char own[64];
+	DIR *d;
+
+	d = opendir(mountpoint);
+	if (!d) {
+		return;
+	}
+
+	// This process's own shadow dir basename; a re-index sweeps it and that is expected.
+	snprintf(own, sizeof(own), "%s%d", XAL_SNAPSHOT_PREFIX, (int)getpid());
+
+	while ((entry = readdir(d))) {
+		char dir[XAL_SNAPSHOT_ENTRY_MAXLEN];
+
+		if (strncmp(entry->d_name, XAL_SNAPSHOT_PREFIX, sizeof(XAL_SNAPSHOT_PREFIX) - 1)) {
+			continue;
+		}
+		if (snprintf(dir, sizeof(dir), "%s/%s", mountpoint, entry->d_name) >= (int)sizeof(dir)) {
+			XAL_DEBUG("FAILED: shadow dir path truncated under mountpoint(%s); skipping",
+				  mountpoint);
+			continue;
+		}
+
+		// Any dir that is not our own is a genuine residual: a crashed prior run or a
+		// concurrent live instance on this mount.
+		if (strcmp(entry->d_name, own) != 0) {
+			XAL_DEBUG("WARNING: residual shadow directory(%s); prior crash or another "
+				  "live instance on this mount?", dir);
+		}
+		reflink_dir_purge(dir);
+	}
+
+	closedir(d);
+}
+
+/**
+ * Lazily create a fresh shadow directory, clearing any stale leftover from a prior crash.
+ */
+static int
+reflink_dir_prepare(struct xal_reflink *rl)
+{
+	reflink_dir_purge(rl->dir);
+
+	if (mkdir(rl->dir, 0700)) {
+		XAL_DEBUG("FAILED: mkdir(%s); errno(%d)", rl->dir, errno);
+		return -errno;
+	}
+	rl->dir_created = true;
+
+	return 0;
+}
+
+/**
+ * Reflink-clone the file open at @origin_fd into the shadow directory.
+ *
+ * FICLONE itself flushes the origin's dirty pages (write-and-wait under the iolock) and resolves
+ * delayed allocation to real blocks before sharing, so no explicit fsync is needed for the clone's
+ * FIEMAP to see true physical extents. The clone is left on-disk (its inode pins the shared
+ * blocks); the fd returned in @clone_fd is only needed to FIEMAP the clone and may be closed
+ * afterwards without freeing blocks.
+ *
+ * One clone per inode instance: a hardlink to the same inode reuses the existing clone rather
+ * than cloning the same data again. Clones are named "<ino>.<gen>" so a recycled inode number
+ * (a different instance) never collides with an earlier one.
+ */
+static int
+reflink_clone_file(struct xal_be_fiemap *be, const char *path, int origin_fd, int *clone_fd)
+{
+	struct xal_reflink *rl = be->reflink;
+	char clone_path[XAL_SNAPSHOT_ENTRY_MAXLEN];
+	struct stat sb;
+	int cfd, err, gen = 0;
+
+	if (!rl->dir_created) {
+		err = reflink_dir_prepare(rl);
+		if (err) {
+			return err;
+		}
+	}
+
+	// No explicit fsync: FICLONE (xfs_reflink_remap_prep -> __generic_remap_file_range_prep)
+	// does filemap_write_and_wait_range on the source under the iolock, writing back the origin's
+	// dirty pages and resolving delalloc to real blocks before sharing -- exactly what the clone's
+	// FIEMAP needs. Device-flush durability is unneeded for the live raw-read model.
+
+	// Name the clone "<ino>.<gen>". The inode number is the primary key ("find <mnt> -inum <ino>"
+	// maps a clone back to its current origin); the generation number distinguishes inode
+	// instances so a recycled inode -- freed and reallocated to a different file during the walk
+	// -- gets a fresh clone instead of being mistaken for the earlier one.
+	if (fstat(origin_fd, &sb)) {
+		XAL_DEBUG("FAILED: fstat(origin); errno(%d)", errno);
+		return -errno;
+	}
+	if (ioctl(origin_fd, FS_IOC_GETVERSION, &gen)) {
+		XAL_DEBUG("FAILED: FS_IOC_GETVERSION(origin); errno(%d)", errno);
+		return -errno;
+	}
+
+	if (snprintf(clone_path, sizeof(clone_path), "%s/%llu.%u", rl->dir,
+		     (unsigned long long)sb.st_ino, (unsigned)gen) >= (int)sizeof(clone_path)) {
+		XAL_DEBUG("FAILED: clone path truncated under dir(%s)", rl->dir);
+		return -ENAMETOOLONG;
+	}
+
+	// One clone per inode instance. EEXIST means this (ino, gen) was already cloned this run --
+	// a hardlink to the same inode -- so reuse the existing (already immutable) clone instead of
+	// cloning the same data again.
+	cfd = open(clone_path, O_RDWR | O_CREAT | O_EXCL, 0600);
+	if (cfd < 0) {
+		if (errno == EEXIST) {
+			cfd = open(clone_path, O_RDONLY);
+			if (cfd < 0) {
+				XAL_DEBUG("FAILED: open(%s); errno(%d)", clone_path, errno);
+				return -errno;
+			}
+			XAL_DEBUG("INFO: reused clone for file(%s)", path);
+			*clone_fd = cfd;
+			return 0;
+		}
+		XAL_DEBUG("FAILED: open(%s); errno(%d)", clone_path, errno);
+		return -errno;
+	}
+
+	if (ioctl(cfd, FICLONE, origin_fd) < 0) {
+		err = -errno;
+		XAL_DEBUG("FAILED: FICLONE(); errno(%d)%s", errno,
+			  errno == EOPNOTSUPP ? " (filesystem lacks reflink)" : "");
+		goto fail_created;
+	}
+
+	// Harden the clone: immutable makes the kernel refuse defrag (swapext/exchange-range) on it,
+	// so its physical extents cannot be relocated for the life of the snapshot. Immutable also
+	// blocks unlink/rm even as root, so xal clears it before unlinking (reflink_dir_purge); manual
+	// cleanup of an orphaned shadow dir needs: chattr -R -i <mnt>/.xal_snapshot.* && rm -rf <same>.
+	err = reflink_chattr_immutable(cfd, true);
+	if (err) {
+		XAL_DEBUG("FAILED: set immutable on clone(%s); err(%d)%s", clone_path, err,
+			  err == -EPERM ? " (need CAP_LINUX_IMMUTABLE)" : "");
+		goto fail_created;
+	}
+
+	XAL_DEBUG("INFO: reflinked file(%s)", path);
+	*clone_fd = cfd;
+
+	return 0;
+
+fail_created:
+	close(cfd);
+	unlink(clone_path); // we created it with O_EXCL, so it is ours to remove
+	return err;
+}
+
 static int
 process_ino_fiemap(struct xal *xal, char *path, struct xal_inode *self);
 
@@ -47,6 +318,13 @@ xal_be_fiemap_close(struct xal *xal)
 
 	if (be->inotify) {
 		xal_be_fiemap_inotify_close(be->inotify);
+	} else if (be->reflink) {
+		if (be->reflink->dir_created) {
+			reflink_dir_purge(be->reflink->dir);
+		}
+		free(be->reflink->dir);
+		free(be->reflink->subtree);
+		free(be->reflink);
 	} else {
 #ifdef XAL_BPF_ENABLED
 		if (be->bpf) {
@@ -58,12 +336,12 @@ xal_be_fiemap_close(struct xal *xal)
 
 		if (fd >= 0) {
 			int err = ioctl(fd, FITHAW, 0);
-			if (errno == EINVAL) {
-				XAL_DEBUG("INFO: FITHAW returned EINVAL; already thawed?");
-			} else if (err < 0) {
-				XAL_DEBUG("ERROR: could not thaw filesystem; errno(%d)", errno);
-			} else {
+			if (err == 0) {
 				XAL_DEBUG("INFO: thawed filesystem");
+			} else if (errno == EINVAL) {
+				XAL_DEBUG("INFO: FITHAW returned EINVAL; already thawed?");
+			} else {
+				XAL_DEBUG("ERROR: could not thaw filesystem; errno(%d)", errno);
 			}
 			close(fd);
 		} else {
@@ -193,7 +471,75 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		goto failed;
 	}
 
-	if (opts->watch_mode) {
+	if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
+		// reflink-snapshot mode: no inotify watch, no freeze; clones pin the blocks
+		size_t dlen;
+
+		be->reflink = calloc(1, sizeof(struct xal_reflink));
+		if (!be->reflink) {
+			XAL_DEBUG("FAILED: calloc(); errno(%d)", errno);
+			err = -errno;
+			goto failed;
+		}
+
+		dlen = strlen(mountpoint) + 32;
+		be->reflink->dir = malloc(dlen);
+		if (!be->reflink->dir) {
+			XAL_DEBUG("FAILED: malloc(); errno(%d)", errno);
+			err = -errno;
+			goto failed;
+		}
+		snprintf(be->reflink->dir, dlen, "%s/" XAL_SNAPSHOT_PREFIX "%d", mountpoint,
+			 (int)getpid());
+
+		if (opts->reflink_subtree && strlen(opts->reflink_subtree)) {
+			size_t mplen = strlen(mountpoint);
+			struct stat st;
+
+			be->reflink->subtree = strdup(opts->reflink_subtree);
+			if (!be->reflink->subtree) {
+				XAL_DEBUG("FAILED: strdup(); errno(%d)", errno);
+				err = -errno;
+				goto failed;
+			}
+
+			// The subtree is matched against absolute, mountpoint-rooted paths, so it must be an
+			// absolute path at or under the mountpoint. Reject a malformed one (relative, typo,
+			// wrong mount) rather than silently reflinking nothing and leaving extents unprotected.
+			if (strncmp(be->reflink->subtree, mountpoint, mplen) != 0 ||
+			    (be->reflink->subtree[mplen] != '\0' &&
+			     be->reflink->subtree[mplen] != '/')) {
+				XAL_DEBUG("FAILED: reflink_subtree(%s) is not under mountpoint(%s)",
+					  be->reflink->subtree, mountpoint);
+				err = -EINVAL;
+				goto failed;
+			}
+
+			// Require the subtree to exist and be a directory now, so a typo'd or missing
+			// path is rejected here with a clear error instead of surfacing later as an
+			// incidental stat() failure during the walk.
+			if (stat(be->reflink->subtree, &st) != 0) {
+				XAL_DEBUG("FAILED: stat(reflink_subtree=%s); errno(%d)",
+					  be->reflink->subtree, errno);
+				err = -errno;
+				goto failed;
+			}
+			if (!S_ISDIR(st.st_mode)) {
+				XAL_DEBUG("FAILED: reflink_subtree(%s) is not a directory",
+					  be->reflink->subtree);
+				err = -ENOTDIR;
+				goto failed;
+			}
+		}
+
+		// Sweep pre-existing shadow dirs now so orphans are cleaned even if the caller never
+		// indexes; xal_index() sweeps again (and resets dir_created) before each (re)snapshot.
+		reflink_sweep_orphans(mountpoint);
+
+		XAL_DEBUG("INFO: reflink-snapshot mode; clones under dir(%s), subtree(%s)",
+			  be->reflink->dir,
+			  be->reflink->subtree ? be->reflink->subtree : "(whole tree)");
+	} else if (opts->watch_mode) {
 		be->inotify = calloc(1, sizeof(struct xal_inotify));
 		if (!be->inotify) {
 			XAL_DEBUG("FAILED: calloc(); errno(%d)", errno);
@@ -244,14 +590,14 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 
 		// when ioctl returns, fs is fully frozen
 		err = ioctl(fd, FIFREEZE, 0);
-		if (errno == EBUSY) {
+		if (err == 0) {
+			XAL_DEBUG("INFO: froze filesystem");
+		} else if (errno == EBUSY) {
 			XAL_DEBUG("INFO: FIFREEZE returned EBUSY; already frozen?");
-		} else if (err < 0) {
+		} else {
 			close(fd);
 			XAL_DEBUG("FAILED: could not freeze filesystem; errno(%d)", errno);
 			goto failed;
-		} else {
-			XAL_DEBUG("INFO: froze filesystem");
 		}
 		close(fd);
 
@@ -270,7 +616,10 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 #endif /* XAL_BPF_ENABLED */
 	}
 
-	nallocated = retrieve_total_entries(be->mountpoint);
+	// Scope the pre-count to the reflink subtree when set: the index walks only that subtree
+	// (see xal_be_fiemap_index), so counting from the mountpoint would over-reserve the inode pool.
+	nallocated = retrieve_total_entries(
+	    (be->reflink && be->reflink->subtree) ? be->reflink->subtree : be->mountpoint);
 	if (nallocated < 0) {
 		XAL_DEBUG("Failed: retrieve_total_entries()");
 		err = nallocated;
@@ -371,6 +720,14 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 		char *name;
 
 		if (!_is_directory_member(entry->d_name)) {
+			entry = readdir(d);
+			continue;
+		}
+
+		// Never index our own reflink shadow dirs (defensive: they are purged before the walk,
+		// but skip any that are present so a re-index does not descend in and clone the clones).
+		if (be->reflink &&
+		    strncmp(entry->d_name, XAL_SNAPSHOT_PREFIX, sizeof(XAL_SNAPSHOT_PREFIX) - 1) == 0) {
 			entry = readdir(d);
 			continue;
 		}
@@ -510,8 +867,8 @@ int
 xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *inode)
 {
 	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
-	struct fiemap *fiemap;
-	int fd, err = 0;
+	struct fiemap *fiemap = NULL;
+	int fd, map_fd, clone_fd = -1, err = 0;
 
 	if (!xal_inode_is_file(inode)) {
 		XAL_DEBUG("FAILED: cannot process file at path(%s) - not a file", path);
@@ -524,14 +881,27 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 		return -errno;
 	}
 
+	// In reflink-snapshot mode, capture extents from a reflink clone (whose blocks are pinned
+	// for the session) instead of the live origin, so they stay valid under concurrent writes.
+	map_fd = fd;
+	if (be->reflink && reflink_applies(be->reflink, path)) {
+		err = reflink_clone_file(be, path, fd, &clone_fd);
+		if (err) {
+			XAL_DEBUG("FAILED: reflink_clone_file(path=%s); err(%d)", path, err);
+			goto failed;
+		}
+		map_fd = clone_fd;
+	}
+
 	fiemap = malloc(sizeof(struct fiemap));
 	if (!fiemap) {
 		XAL_DEBUG("FAILED: malloc(); errno(%d)", errno);
+		err = -ENOMEM;
 		goto failed;
 	}
 	memset(fiemap, 0, sizeof(struct fiemap));
 
-	err = read_fiemap(fd, &fiemap);
+	err = read_fiemap(map_fd, &fiemap);
 	if (err) {
 		XAL_DEBUG("FAILED: read_fiemap(); err(%d)", err);
 		goto failed;
@@ -560,6 +930,9 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 	}
 
 	free(fiemap);
+	if (clone_fd >= 0) {
+		close(clone_fd); // clone stays on-disk in the shadow dir; blocks remain pinned
+	}
 	close(fd);
 
 	if (be->path_inode_map) {
@@ -578,7 +951,10 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 
 failed:
 	free(fiemap);
-	if (fd) {
+	if (clone_fd >= 0) {
+		close(clone_fd);
+	}
+	if (fd >= 0) {
 		close(fd);
 	}
 
@@ -688,10 +1064,34 @@ xal_be_fiemap_index(struct xal *xal)
 	root->content.extents.count = 0;
 	root->content.dentries.count = 0;
 
-	err = process_ino_fiemap(xal, be->mountpoint, root);
+	// In reflink mode, sweep every shadow dir under the mountpoint before the walk -- orphans left
+	// by a crashed prior run (any pid) and this handle's own previous index -- then reset so the
+	// dir is rebuilt fresh. This cleans orphans, makes a re-index re-snapshot the current tree, and
+	// keeps the shadow dir absent while the mountpoint is enumerated (so the walk cannot descend
+	// into it and clone the clones).
+	if (be->reflink) {
+		reflink_sweep_orphans(be->mountpoint);
+		be->reflink->dir_created = false;
+	}
+
+	// Scope the walk to the reflink subtree when set: only files under it belong to the snapshot,
+	// so there is no reason to traverse or index anything outside it. Rerooting the tree at the
+	// subtree keeps absolute-path lookups working -- xal_be_fiemap_get_inode() strips the same
+	// subtree prefix as its basepath (see there).
+	char *walk_root = be->mountpoint;
+
+	if (be->reflink && be->reflink->subtree) {
+		walk_root = be->reflink->subtree;
+	}
+
+	err = process_ino_fiemap(xal, walk_root, root);
 	if (err) {
 		XAL_DEBUG("FAILED: process_ino_fiemap(); err(%d)", err);
 		goto exit;
+	}
+
+	if (be->reflink) {
+		XAL_DEBUG("INFO: reflink snapshot complete; clones under dir(%s)", be->reflink->dir);
 	}
 
 	atomic_store(xal->dirty, false);
@@ -811,7 +1211,12 @@ xal_be_fiemap_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 		*inode = kh_val(map, iter);
 
 	} else {
-		err = search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, be->mountpoint, inode);
+		// Match the basepath to the indexed tree root: in reflink-snapshot mode the walk is
+		// rerooted at the subtree, so strip the subtree prefix (not the mountpoint) from the query.
+		char *basepath =
+		    (be->reflink && be->reflink->subtree) ? be->reflink->subtree : be->mountpoint;
+
+		err = search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, basepath, inode);
 		if (err) {
 			XAL_DEBUG("FAILED: search_by_traversal(%s); err(%d)", path, err);
 			return err;
