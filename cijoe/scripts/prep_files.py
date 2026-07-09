@@ -16,6 +16,18 @@ import os
 import re
 import json
 
+
+def str2bool(value: str) -> bool:
+    """Parse a cijoe '--flag <value>' string as a boolean.
+
+    cijoe always renders a workflow 'with' entry as '--flag <value>', so a boolean flag must take
+    a value. A plain truthiness check would treat 'false'/'0' (a non-empty string) as True; this
+    parses the intended boolean instead.
+    """
+
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 COLUMNS = ["startoffset", "endoffset", "startblock", "endblock"]
 
 
@@ -232,10 +244,11 @@ def mount(args: Namespace, cijoe: Cijoe) -> int:
     Returns error in case any of the above fails, or if mountpoint is already mounted.
     """
 
-    err, state = cijoe.run(f"mountpoint {args.mountpoint}")
-    if not err:
-        log.error(f"mountpoint({args.mountpoint}); already mounted")
-        return err
+    # Release any prior mount at this mountpoint (e.g. a leftover from a previous run that used
+    # keep_mounted) so the configured dev_path is what actually gets mounted here -- not a stale
+    # device. Previously an "already mounted" mountpoint returned success WITHOUT mounting, which
+    # silently ran the tests against whatever device happened to be mounted.
+    cijoe.run(f"sudo umount {args.mountpoint} || true")
 
     err, state = cijoe.run(f"sudo mkdir -p {args.mountpoint}")
     if err:
@@ -332,6 +345,18 @@ def add_args(parser: ArgumentParser):
         type=Path,
         help="Produce a bmap.json file containing all extents for files",
     )
+    parser.add_argument(
+        "--keep_mounted",
+        type=str2bool,
+        default=False,
+        help="Leave the filesystem mounted after populating (for tests needing a live mount)",
+    )
+    parser.add_argument(
+        "--skip_populate",
+        type=str2bool,
+        default=False,
+        help="Only mount (skip file population); for tests that provision their own files",
+    )
 
 
 def main(args: Namespace, cijoe: Cijoe) -> int:
@@ -340,8 +365,11 @@ def main(args: Namespace, cijoe: Cijoe) -> int:
     if err := mount(args, cijoe):
         return err
 
-    if err := populate(args, cijoe):
-        return err
+    # Reflink tests provision their own small file set; skipping the ~25k-file population keeps
+    # the whole-tree snapshot fast and bounded (and light on a RAM-backed zram device).
+    if not getattr(args, "skip_populate", None):
+        if err := populate(args, cijoe):
+            return err
 
     if args.produce_index:
         if err := produce_index(args, cijoe):
@@ -351,8 +379,11 @@ def main(args: Namespace, cijoe: Cijoe) -> int:
         if err := produce_bmap(args, cijoe):
             return err
 
-    if err := umount(args, cijoe):
-        return err
+    # Tests that use the FIEMAP backend (e.g. reflink-snapshot) need the mount to persist;
+    # the XFS-backend tests read the raw device and prefer it unmounted.
+    if not getattr(args, "keep_mounted", None):
+        if err := umount(args, cijoe):
+            return err
 
     return 0
 

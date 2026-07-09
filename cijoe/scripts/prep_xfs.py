@@ -12,6 +12,17 @@ from cijoe.core.command import Cijoe
 from pathlib import Path
 
 
+def str2bool(value: str) -> bool:
+    """Parse a cijoe '--flag <value>' string as a boolean.
+
+    cijoe always renders a workflow 'with' entry as '--flag <value>', so a boolean flag must take
+    a value. A plain truthiness check would treat 'false'/'0' (a non-empty string) as True; this
+    parses the intended boolean instead.
+    """
+
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def umount(args: Namespace, cijoe: Cijoe) -> int:
     """Unmount the file-system at args.mountpoint"""
 
@@ -70,13 +81,34 @@ def add_args(parser: ArgumentParser):
         type=Path,
         help="Path to mountpoint",
     )
+    parser.add_argument(
+        "--reflink",
+        type=str2bool,
+        default=False,
+        help="Format with reflink=1 (required for the reflink-snapshot tests)",
+    )
 
 
 def main(args: Namespace, cijoe: Cijoe):
     """Entry-point of the cijoe-script"""
 
+    # Safety net: never mkfs a mounted device -- that would destroy live data. The loop/zram preps
+    # unmount their device beforehand; a real device (e.g. nvme) must be a dedicated, unmounted
+    # target. This also protects against a config that points dev_path at a disk holding data.
+    err, _ = cijoe.run(f"findmnt --source {args.dev_path} > /dev/null 2>&1")
+    if not err:
+        log.error(
+            f"Refusing to mkfs {args.dev_path}: it is mounted. Unmount it, or point the config "
+            f"at a dedicated spare device/namespace."
+        )
+        return 1
+
+    # reflink=1 is the mkfs.xfs default on recent xfsprogs, but request it explicitly so the
+    # reflink-snapshot tests do not depend on the tool's default.
+    reflink_opt = "-m reflink=1 " if getattr(args, "reflink", False) else ""
+
     err, state = cijoe.run(
-        f"sudo mkfs.xfs -b size=4096 -n size=8192 -f {args.dev_path}"
+        f"sudo mkfs.xfs {reflink_opt}-b size=4096 -n size=8192 -f {args.dev_path}"
     )
     if err:
         log.error("Failed creating filesystem")

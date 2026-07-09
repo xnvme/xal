@@ -1,0 +1,39 @@
+---
+doc: |
+  Prepare an XFS(reflink=1) filesystem and run the reflink-snapshot tests
+
+  * Assumes a block-device is available at 'config.xal.dev_path'
+  * Formats it with XFS *with reflink enabled* (required by XAL_WATCHMODE_REFLINK_SNAPSHOT)
+  * Mounts the file-system and fills it with a bunch of files
+  * Runs the reflink-snapshot tests (tests/test_reflink.py), which drive the
+    'xal_snapshot_hold' helper to hold a live snapshot open while asserting fidelity,
+    immutability, CoW stability, subtree scoping, and purge-on-close.
+
+steps:
+- name: prep_bdev
+  uses: prep_loop
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    size-in-gb: 10
+
+- name: prep_fs
+  uses: prep_xfs
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    reflink: true
+
+- name: prep_files
+  uses: prep_files
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    keep_mounted: true
+    skip_populate: true
+
+- name: test
+  uses: core.testrunner
+  with:
+    run_local: true
+    random_order: false
+    args: "tests/test_reflink.py"

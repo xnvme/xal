@@ -1,0 +1,35 @@
+---
+doc: |
+  Prepare an XFS(reflink=1) filesystem on a real NVMe device and run the reflink-snapshot tests
+
+  !!! DESTRUCTIVE !!!
+  This FORMATS config.xal.dev_path with `mkfs.xfs` -- every byte on that device is destroyed.
+  Point configs/localhost-nvme.toml at a DEDICATED, UNMOUNTED spare NVMe device/namespace, never
+  a disk holding data you care about. As a safety net, prep_xfs refuses to format a device that is
+  currently mounted.
+
+  Unlike the loop/zram variants there is no block-device creation step -- the NVMe device is assumed
+  to already exist. Steps: format (reflink) -> mount (no population) -> run tests/test_reflink.py.
+
+steps:
+- name: prep_fs
+  uses: prep_xfs
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    reflink: true
+
+- name: prep_files
+  uses: prep_files
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    keep_mounted: true
+    skip_populate: true
+
+- name: test
+  uses: core.testrunner
+  with:
+    run_local: true
+    random_order: false
+    args: "tests/test_reflink.py"

@@ -39,12 +39,13 @@ def main(args: Namespace, cijoe: Cijoe):
 
     size_bytes = int(args.size_in_gb << 30)
     dev_path = cijoe.getconf("xal.dev_path", args.dev_path)
-    file_path = cijoe.getconf("xal.mountpoint", args.file_path)
 
     if "zram" not in dev_path:
         log.info(f"Substr 'zram' not in dev_path({dev_path}); skipping")
         return 0
 
+    # Release any stale binding from a prior run (a left-behind mount makes --reset fail EBUSY).
+    cijoe.run(f'sudo umount {dev_path} || echo "Above is OK."')
     cijoe.run(f'sudo swapoff {dev_path} || echo "Above error is OK."')
     cijoe.run(f'sudo zramctl --reset {dev_path} || echo "Above is OK."')
     cijoe.run(f'sudo modprobe -r zram || echo "Above is OK."')

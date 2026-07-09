@@ -1,0 +1,41 @@
+---
+doc: |
+  Prepare an XFS(reflink=1) filesystem on a zram device and run the reflink-snapshot tests
+
+  Same as prep_and_test_reflink.yaml but backs the fixture with zram instead of a loop device,
+  which avoids loop-minor contention on desktops where snapd occupies /dev/loop0../dev/loopN.
+
+  * Creates /dev/zram0 (config.xal.dev_path)
+  * Formats it with XFS *with reflink enabled*
+  * Mounts it and leaves it mounted, without the heavy file population (the reflink tests
+    provision their own small file set)
+  * Runs the reflink-snapshot tests (tests/test_reflink.py)
+
+steps:
+- name: prep_bdev
+  uses: prep_zram
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    size-in-gb: 4
+
+- name: prep_fs
+  uses: prep_xfs
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    reflink: true
+
+- name: prep_files
+  uses: prep_files
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    keep_mounted: true
+    skip_populate: true
+
+- name: test
+  uses: core.testrunner
+  with:
+    run_local: true
+    random_order: false
+    args: "tests/test_reflink.py"

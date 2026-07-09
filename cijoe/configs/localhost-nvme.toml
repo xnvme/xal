@@ -3,6 +3,9 @@
 fail_fast=true
 
 [xal]
+# WARNING: the nvme workflows FORMAT this device with mkfs.xfs -- ALL DATA ON IT IS DESTROYED.
+# Set this to a DEDICATED, UNMOUNTED spare NVMe device/namespace only. Do NOT point it at a disk
+# holding data (e.g. a mounted /mnt/... device). prep_xfs refuses to format a mounted device.
 dev_path="/dev/nvme0n1"
 mountpoint="/tmp/xal_testing"
 
