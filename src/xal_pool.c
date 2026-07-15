@@ -38,13 +38,11 @@ xal_pool_grow(struct xal_pool *pool, size_t growby)
 {
 	size_t growby_nbytes = growby * pool->element_size;
 	size_t allocated_nbytes = growby_nbytes + pool->allocated * pool->element_size;
-	uint8_t *cursor = pool->memory;
 
 	if (mprotect(pool->memory, allocated_nbytes, PROT_READ | PROT_WRITE)) {
 		XAL_DEBUG("FAILED: mprotect(...); errno(%d)", errno);
 		return -errno;
 	}
-	memset(&cursor[pool->free * pool->element_size], 0, growby_nbytes);
 
 	pool->allocated += growby;
 
@@ -131,22 +129,33 @@ xal_pool_claim_inodes(struct xal_pool *pool, size_t count, uint32_t *idx)
 {
 	int err;
 
-	if (count > pool->growby) {
-		XAL_DEBUG("FAILED: count > pool->growby");
-		return -EINVAL;
+	/* A single claim may exceed growby; grow by as much as this claim needs. The only
+	 * hard limit is the reserved virtual range. */
+	if (pool->free + count > pool->reserved) {
+		XAL_DEBUG("FAILED: claim(%zu) exceeds reserved(%zu)", count, pool->reserved);
+		return -ENOMEM;
 	}
 
-	if (pool->allocated <= (pool->free + count)) {
-		err = xal_pool_grow(pool, pool->growby);
+	/* Reject before growing: indices are uint32_t. Only bites when a caller sets
+	 * reserved > UINT32_MAX; otherwise the reserved check above already caught it. */
+	if (pool->free + count > UINT32_MAX) {
+		XAL_DEBUG("FAILED: pool->free exceeds uint32_t range");
+		return -EOVERFLOW;
+	}
+
+	if ((pool->free + count) > pool->allocated) {
+		size_t need = (pool->free + count) - pool->allocated;
+		size_t by = need > pool->growby ? need : pool->growby;
+
+		if (pool->allocated + by > pool->reserved) {
+			by = pool->reserved - pool->allocated;
+		}
+
+		err = xal_pool_grow(pool, by);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_pool_grow(); err(%d)", err);
 			return err;
 		}
-	}
-
-	if (pool->free + count > UINT32_MAX) {
-		XAL_DEBUG("FAILED: pool->free exceeds uint32_t range");
-		return -EOVERFLOW;
 	}
 
 	if (idx) {
@@ -162,15 +171,32 @@ xal_pool_claim_extents(struct xal_pool *pool, size_t count, uint32_t *idx)
 {
 	int err;
 
-	if (count > pool->growby) {
-		XAL_DEBUG("FAILED: count > pool->growby");
-		return -EINVAL;
+	/* A single claim may exceed growby (e.g. one heavily-fragmented file with more
+	 * extents than the tree has entries). Grow by as much as this claim needs; the only
+	 * hard limit is the reserved virtual range. */
+	if (pool->free + count > pool->reserved) {
+		XAL_DEBUG("FAILED: claim(%zu) exceeds reserved(%zu)", count, pool->reserved);
+		return -ENOMEM;
 	}
 
-	if (pool->allocated <= (pool->free + count)) {
-		err = xal_pool_grow(pool, pool->growby);
+	/* Reject before growing: indices are uint32_t. Only bites when a caller sets
+	 * reserved > UINT32_MAX; otherwise the reserved check above already caught it. */
+	if (pool->free + count > UINT32_MAX) {
+		XAL_DEBUG("FAILED: pool->free exceeds uint32_t range");
+		return -EOVERFLOW;
+	}
+
+	if ((pool->free + count) > pool->allocated) {
+		size_t need = (pool->free + count) - pool->allocated;
+		size_t by = need > pool->growby ? need : pool->growby;
+
+		if (pool->allocated + by > pool->reserved) {
+			by = pool->reserved - pool->allocated;
+		}
+
+		err = xal_pool_grow(pool, by);
 		if (err) {
-			XAL_DEBUG("xal_pool_grow(); err(%d)", err);
+			XAL_DEBUG("FAILED: xal_pool_grow(); err(%d)", err);
 			return err;
 		}
 	}
