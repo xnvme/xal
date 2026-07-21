@@ -143,14 +143,25 @@ def provoke_odf_file_fmt_btree(args: Namespace, cijoe: Cijoe) -> int:
     Creates a file to trigger B+tree on-disk allocation for file content storage.
 
     This is typically needed due to fragmentation and can be provoked by introducing
-    "holes" during file allocation. Specifically, here 600 calls to `fallocate` allocate
-    4 KB segments at non-contiguous 4 KB offsets. The resulting small file forces B+tree
-    usage, as each gap requires a new extent.
+    "holes" during file allocation. Specifically, for each target extent count N, N calls
+    to `fallocate` allocate 4 KB segments at non-contiguous 4 KB offsets. The resulting
+    file forces B+tree usage, as each gap requires a new extent.
+
+    With --overhead-sweep the target extent counts become a per-extent overhead sweep: a
+    range of files whose extent count spans ~2 decades, so index/FICLONE/FIEMAP cost can be
+    plotted against extent count. That is off by default because each extent costs one
+    `fallocate` process spawn, so the largest count dominates populate time; routine runs
+    keep the original two-point set.
     """
 
     prefix = args.mountpoint / "should-be-file-fmt_btree"
 
-    for nextents in [600, 6000]:
+    nextents_sweep = (
+        [600, 2000, 6000, 20000, 60000]
+        if args.overhead_sweep
+        else [600, 6000]
+    )
+    for nextents in nextents_sweep:
         filepath = prefix / f"fragmented-nextents-{nextents}"
 
         commands = [
@@ -357,6 +368,13 @@ def add_args(parser: ArgumentParser):
         default=False,
         help="Only mount (skip file population); for tests that provision their own files",
     )
+    parser.add_argument(
+        "--overhead_sweep",
+        type=str2bool,
+        default=False,
+        help="Widen the FMT_BTREE extent-count set to a ~2-decade sweep for overhead measurement "
+        "(slow: the largest file is built with one fallocate spawn per extent)",
+    )
 
 
 def main(args: Namespace, cijoe: Cijoe) -> int:
@@ -367,7 +385,7 @@ def main(args: Namespace, cijoe: Cijoe) -> int:
 
     # Reflink tests provision their own small file set; skipping the ~25k-file population keeps
     # the whole-tree snapshot fast and bounded (and light on a RAM-backed zram device).
-    if not getattr(args, "skip_populate", None):
+    if not args.skip_populate:
         if err := populate(args, cijoe):
             return err
 
@@ -381,7 +399,7 @@ def main(args: Namespace, cijoe: Cijoe) -> int:
 
     # Tests that use the FIEMAP backend (e.g. reflink-snapshot) need the mount to persist;
     # the XFS-backend tests read the raw device and prefer it unmounted.
-    if not getattr(args, "keep_mounted", None):
+    if not args.keep_mounted:
         if err := umount(args, cijoe):
             return err
 
