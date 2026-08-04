@@ -67,7 +67,7 @@ main(int argc, char *argv[])
 	opts.be = XAL_BACKEND_FIEMAP;
 	opts.watch_mode = XAL_WATCHMODE_REFLINK_SNAPSHOT;
 	opts.mountpoint = mountpoint;
-	opts.reflink_subtree = subtree; // NULL => whole indexed tree
+	opts.subtree = subtree; // NULL => whole indexed tree
 
 	err = xal_open(dev, &xal, &opts);
 	if (err < 0) {

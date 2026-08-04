@@ -47,7 +47,7 @@ enum xal_watchmode {
 	XAL_WATCHMODE_NONE             = 0,  ///< There will be no notifications of changes to the filesystem.
 	XAL_WATCHMODE_DIRTY_DETECTION  = 1,  ///< When changes to the file system occurs, the xal struct will become "dirty" indicating that the representation of the file system is stale.
 	XAL_WATCHMODE_EXTENT_UPDATE    = 2,  ///< When other changes to the file system occurs, the xal struct will be automatically updated if the extent information is the only subject to change, otherwise the xal struct will become "dirty" indicating that the representation of the file system is stale.
-	XAL_WATCHMODE_REFLINK_SNAPSHOT = 3,  ///< At xal_index() time, reflink every regular file (optionally restricted to opts.reflink_subtree) into a private snapshot and capture extents from the clones. The clones pin their blocks for the xal session, so the extents returned by xal_get_extents() stay valid under concurrent writes. No inotify watch or filesystem freeze is used; clones are removed at xal_close().
+	XAL_WATCHMODE_REFLINK_SNAPSHOT = 3,  ///< At xal_index() time, reflink every regular file (optionally restricted to opts.subtree) into a private snapshot and capture extents from the clones. The clones pin their blocks for the xal session, so the extents returned by xal_get_extents() stay valid under concurrent writes. No inotify watch or filesystem freeze is used; clones are removed at xal_close().
 };
 
 enum xal_file_lookupmode {
@@ -61,7 +61,7 @@ struct xal_opts {
 	enum xal_file_lookupmode file_lookupmode;
 	const char *mountpoint;
 	const char *shm_name; ///< If set, pool memory is backed by POSIX shared memory with this base name, see @xal_from_pools() for sharing the pools across processes
-	const char *reflink_subtree; ///< For XAL_WATCHMODE_REFLINK_SNAPSHOT: absolute path under which regular files are reflinked; NULL/empty reflinks the whole indexed tree.
+	const char *subtree; ///< FIEMAP backend only: absolute path at or under the mountpoint to scope the index to. Only files under it are indexed (and, in XAL_WATCHMODE_REFLINK_SNAPSHOT, reflinked). NULL/empty indexes the whole mount. Ignored by the XFS backend.
 };
 
 struct xal_extent {

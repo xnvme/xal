@@ -11,7 +11,7 @@ access.
 
 **Proposal: at index time, reflink (`FICLONE`) every regular file into a private,
 same-device snapshot and read the extents off the clones.** Exposed as a watch mode,
-`XAL_WATCHMODE_REFLINK_SNAPSHOT` (optionally scoped to `opts.reflink_subtree`). Each
+`XAL_WATCHMODE_REFLINK_SNAPSHOT` (optionally scoped to `opts.subtree`). Each
 clone shares the origin's blocks but is **hardened immutable**, so writes to the origin
 divert to new blocks (CoW) and nothing can relocate the clone — the extents stay valid
 for the whole xal session. Clones live on the **same namespace**, so their extents are
@@ -63,7 +63,7 @@ problem* into a *tractable per-file versioning problem*.
 ## Proposed approach: index-time reflink snapshot
 
 Exposed as a new watch mode, **`XAL_WATCHMODE_REFLINK_SNAPSHOT`** (with optional
-**`opts.reflink_subtree`** to restrict which files are captured — the index walk is rerooted
+**`opts.subtree`** (a general FIEMAP-backend index scope) to restrict which files are captured — the index walk is rerooted
 at the subtree, so files outside it are neither traversed nor FIEMAP'd). It hooks the existing
 FIEMAP index walk (`xal_be_fiemap_process_inode_file`); there is **no new query API** —
 `xal_get_extents()` returns the same pooled extents, which now point at pinned clone

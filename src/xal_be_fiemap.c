@@ -36,33 +36,16 @@ KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
 /**
  * Reflink-snapshot state (XAL_WATCHMODE_REFLINK_SNAPSHOT).
  *
- * At index time every regular file (optionally restricted to @subtree) is reflink-cloned into a
- * private shadow directory. The clone's on-disk inode keeps the shared blocks allocated for the
- * whole xal session -- so the extents captured from it stay valid even as the origin is rewritten
- * (writes to the origin divert to new blocks via CoW). The clones are removed at xal_close().
+ * At index time every regular file the walk visits is reflink-cloned into a private shadow
+ * directory (the walk is scoped by be->subtree, so the subtree restriction is applied there, not
+ * here). The clone's on-disk inode keeps the shared blocks allocated for the whole xal session --
+ * so the extents captured from it stay valid even as the origin is rewritten (writes to the origin
+ * divert to new blocks via CoW). The clones are removed at xal_close().
  */
 struct xal_reflink {
 	char *dir;        ///< Shadow directory holding the clones: <mountpoint>/.xal_snapshot.<pid>
-	char *subtree;    ///< Absolute path prefix restricting which files are reflinked; NULL = all
 	bool dir_created; ///< The shadow directory is created lazily on the first clone
 };
-
-/**
- * Whether the file at @path is covered by the (optional) subtree restriction.
- */
-static bool
-reflink_applies(struct xal_reflink *rl, const char *path)
-{
-	size_t n;
-
-	if (!rl->subtree) {
-		return true;
-	}
-
-	n = strlen(rl->subtree);
-
-	return (strncmp(path, rl->subtree, n) == 0) && (path[n] == '\0' || path[n] == '/');
-}
 
 /**
  * Set or clear the immutable inode flag (FS_IMMUTABLE_FL) on an open fd. Requires
@@ -323,7 +306,6 @@ xal_be_fiemap_close(struct xal *xal)
 			reflink_dir_purge(be->reflink->dir);
 		}
 		free(be->reflink->dir);
-		free(be->reflink->subtree);
 		free(be->reflink);
 	} else {
 #ifdef XAL_BPF_ENABLED
@@ -350,6 +332,7 @@ xal_be_fiemap_close(struct xal *xal)
 	}
 
 	free(be->mountpoint);
+	free(be->subtree);
 
 	inode_map = be->path_inode_map;
 
@@ -471,6 +454,45 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		goto failed;
 	}
 
+	// Optional subtree: scope the index walk to a path at/under the mountpoint. General to the
+	// FIEMAP backend (any watch mode); in reflink-snapshot mode it also bounds what gets cloned,
+	// since only the walked files are reflinked.
+	if (opts->subtree && strlen(opts->subtree)) {
+		size_t mplen = strlen(mountpoint);
+		struct stat st;
+
+		be->subtree = strdup(opts->subtree);
+		if (!be->subtree) {
+			XAL_DEBUG("FAILED: strdup(); errno(%d)", errno);
+			err = -errno;
+			goto failed;
+		}
+
+		// Matched against absolute, mountpoint-rooted paths, so it must be an absolute path at or
+		// under the mountpoint. Reject a malformed one (relative, typo, wrong mount) rather than
+		// silently indexing nothing.
+		if (strncmp(be->subtree, mountpoint, mplen) != 0 ||
+		    (be->subtree[mplen] != '\0' && be->subtree[mplen] != '/')) {
+			XAL_DEBUG("FAILED: subtree(%s) is not under mountpoint(%s)", be->subtree,
+				  mountpoint);
+			err = -EINVAL;
+			goto failed;
+		}
+
+		// Require the subtree to exist and be a directory now, so a typo'd or missing path is
+		// rejected here with a clear error instead of surfacing later during the walk.
+		if (stat(be->subtree, &st) != 0) {
+			XAL_DEBUG("FAILED: stat(subtree=%s); errno(%d)", be->subtree, errno);
+			err = -errno;
+			goto failed;
+		}
+		if (!S_ISDIR(st.st_mode)) {
+			XAL_DEBUG("FAILED: subtree(%s) is not a directory", be->subtree);
+			err = -ENOTDIR;
+			goto failed;
+		}
+	}
+
 	if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
 		// reflink-snapshot mode: no inotify watch, no freeze; clones pin the blocks
 		size_t dlen;
@@ -492,53 +514,12 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		snprintf(be->reflink->dir, dlen, "%s/" XAL_SNAPSHOT_PREFIX "%d", mountpoint,
 			 (int)getpid());
 
-		if (opts->reflink_subtree && strlen(opts->reflink_subtree)) {
-			size_t mplen = strlen(mountpoint);
-			struct stat st;
-
-			be->reflink->subtree = strdup(opts->reflink_subtree);
-			if (!be->reflink->subtree) {
-				XAL_DEBUG("FAILED: strdup(); errno(%d)", errno);
-				err = -errno;
-				goto failed;
-			}
-
-			// The subtree is matched against absolute, mountpoint-rooted paths, so it must be an
-			// absolute path at or under the mountpoint. Reject a malformed one (relative, typo,
-			// wrong mount) rather than silently reflinking nothing and leaving extents unprotected.
-			if (strncmp(be->reflink->subtree, mountpoint, mplen) != 0 ||
-			    (be->reflink->subtree[mplen] != '\0' &&
-			     be->reflink->subtree[mplen] != '/')) {
-				XAL_DEBUG("FAILED: reflink_subtree(%s) is not under mountpoint(%s)",
-					  be->reflink->subtree, mountpoint);
-				err = -EINVAL;
-				goto failed;
-			}
-
-			// Require the subtree to exist and be a directory now, so a typo'd or missing
-			// path is rejected here with a clear error instead of surfacing later as an
-			// incidental stat() failure during the walk.
-			if (stat(be->reflink->subtree, &st) != 0) {
-				XAL_DEBUG("FAILED: stat(reflink_subtree=%s); errno(%d)",
-					  be->reflink->subtree, errno);
-				err = -errno;
-				goto failed;
-			}
-			if (!S_ISDIR(st.st_mode)) {
-				XAL_DEBUG("FAILED: reflink_subtree(%s) is not a directory",
-					  be->reflink->subtree);
-				err = -ENOTDIR;
-				goto failed;
-			}
-		}
-
 		// Sweep pre-existing shadow dirs now so orphans are cleaned even if the caller never
 		// indexes; xal_index() sweeps again (and resets dir_created) before each (re)snapshot.
 		reflink_sweep_orphans(mountpoint);
 
 		XAL_DEBUG("INFO: reflink-snapshot mode; clones under dir(%s), subtree(%s)",
-			  be->reflink->dir,
-			  be->reflink->subtree ? be->reflink->subtree : "(whole tree)");
+			  be->reflink->dir, be->subtree ? be->subtree : "(whole tree)");
 	} else if (opts->watch_mode) {
 		be->inotify = calloc(1, sizeof(struct xal_inotify));
 		if (!be->inotify) {
@@ -616,10 +597,9 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 #endif /* XAL_BPF_ENABLED */
 	}
 
-	// Scope the pre-count to the reflink subtree when set: the index walks only that subtree
+	// Scope the pre-count to the subtree when set: the index walks only that subtree
 	// (see xal_be_fiemap_index), so counting from the mountpoint would over-reserve the inode pool.
-	nallocated = retrieve_total_entries(
-	    (be->reflink && be->reflink->subtree) ? be->reflink->subtree : be->mountpoint);
+	nallocated = retrieve_total_entries(be->subtree ? be->subtree : be->mountpoint);
 	if (nallocated < 0) {
 		XAL_DEBUG("Failed: retrieve_total_entries()");
 		err = nallocated;
@@ -884,7 +864,7 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 	// In reflink-snapshot mode, capture extents from a reflink clone (whose blocks are pinned
 	// for the session) instead of the live origin, so they stay valid under concurrent writes.
 	map_fd = fd;
-	if (be->reflink && reflink_applies(be->reflink, path)) {
+	if (be->reflink) {
 		err = reflink_clone_file(be, path, fd, &clone_fd);
 		if (err) {
 			XAL_DEBUG("FAILED: reflink_clone_file(path=%s); err(%d)", path, err);
@@ -1074,15 +1054,11 @@ xal_be_fiemap_index(struct xal *xal)
 		be->reflink->dir_created = false;
 	}
 
-	// Scope the walk to the reflink subtree when set: only files under it belong to the snapshot,
-	// so there is no reason to traverse or index anything outside it. Rerooting the tree at the
-	// subtree keeps absolute-path lookups working -- xal_be_fiemap_get_inode() strips the same
-	// subtree prefix as its basepath (see there).
-	char *walk_root = be->mountpoint;
-
-	if (be->reflink && be->reflink->subtree) {
-		walk_root = be->reflink->subtree;
-	}
+	// Scope the walk to the subtree when set: only files under it are indexed, so there is no
+	// reason to traverse anything outside it. Rerooting the tree at the subtree keeps absolute-path
+	// lookups working -- xal_be_fiemap_get_inode() strips the same subtree prefix as its basepath
+	// (see there).
+	char *walk_root = be->subtree ? be->subtree : be->mountpoint;
 
 	err = process_ino_fiemap(xal, walk_root, root);
 	if (err) {
@@ -1211,10 +1187,9 @@ xal_be_fiemap_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 		*inode = kh_val(map, iter);
 
 	} else {
-		// Match the basepath to the indexed tree root: in reflink-snapshot mode the walk is
-		// rerooted at the subtree, so strip the subtree prefix (not the mountpoint) from the query.
-		char *basepath =
-		    (be->reflink && be->reflink->subtree) ? be->reflink->subtree : be->mountpoint;
+		// Match the basepath to the indexed tree root: when a subtree is set the walk is rerooted
+		// at it, so strip the subtree prefix (not the mountpoint) from the query.
+		char *basepath = be->subtree ? be->subtree : be->mountpoint;
 
 		err = search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, basepath, inode);
 		if (err) {

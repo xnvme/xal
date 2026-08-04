@@ -8,7 +8,7 @@
 #define ODF_BLOCK_DIR_BYTES_MAX 64UL * 1024 ///< Maximum size of a directory block
 #define ODF_BLOCK_FS_BYTES_MAX 64UL * 1024  ///< Maximum size of a filestem block
 #define ODF_INODE_MAX_NBYTES 2048	    ///< Maximum size of an inode
-#define XAL_BACKEND_SIZE 64
+#define XAL_BACKEND_SIZE 72
 
 struct xal_backend_base {
 	enum xal_backend type;

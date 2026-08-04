@@ -150,7 +150,7 @@ def test_reflink_whole_tree(cijoe):
     cijoe.run(f"sudo rm -f {origin}")
 
 
-def test_reflink_subtree_scoping(cijoe):
+def test_subtree_scoping(cijoe):
     """With a subtree, only files under it are cloned; a file outside it is not."""
 
     dev_path, mountpoint = _require_fixture(cijoe)

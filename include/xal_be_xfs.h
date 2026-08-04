@@ -22,7 +22,7 @@ struct xal_be_xfs {
 	void *dinodes_map;    ///< Map of dinodes for O(1) ~ avg. lookup
 	struct xal_ag *ags;   ///< Array of 'agcount' number of allocation-groups
 
-	uint8_t _rsvd[8];
+	uint8_t _rsvd[16];
 };
 XAL_STATIC_ASSERT(sizeof(struct xal_be_xfs) == XAL_BACKEND_SIZE, "Incorrect size");
 
