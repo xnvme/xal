@@ -408,7 +408,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	xal->sb = state->sb;
 
 	if (atomic_load(xal->dirty)) {
-		err = -EINVAL;
+		err = -ESTALE;
 		goto unmap_state;
 	}
 
