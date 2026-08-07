@@ -11,6 +11,7 @@ project('xal', 'c',
 )
 
 pkg = import('pkgconfig')
+fs = import('fs')
 cc = meson.get_compiler('c')
 
 xallib_libdir = get_option('libdir')
@@ -52,17 +53,24 @@ xal_sources = [sources]
 
 include_dirs = include_directories('include', 'tp')
 
+# BPF: BTF source file
+vmlinux_btf = '/sys/kernel/btf/vmlinux'
+
 # BPF: build dependencies
 libbpf_dep = dependency('libbpf', required: false)
-if libbpf_dep.found()
+bpf_enabled = libbpf_dep.found()
+
+if bpf_enabled and not fs.exists(vmlinux_btf)
+  message('BPF: disabled, no kernel BTF at ' + vmlinux_btf)
+  bpf_enabled = false
+endif
+
+if bpf_enabled
   libelf_dep = dependency('libelf', required: true)
   zlib_dep = dependency('zlib', required: true)
 
   bpftool = find_program('bpftool', required: true)
   clang = find_program('clang', required: true)
-
-  # BPF: BTF source file
-  vmlinux_btf = '/sys/kernel/btf/vmlinux'
 
   # BPF: generate vmlinux.h
   vmlinux_h = custom_target(
@@ -135,7 +143,7 @@ endif
 
 conf_data = configuration_data()
 conf_data.set('XAL_DEBUG_ENABLED', get_option('buildtype') == 'debug' and get_option('debug-logging'))
-conf_data.set('XAL_BPF_ENABLED', libbpf_dep.found())
+conf_data.set('XAL_BPF_ENABLED', bpf_enabled)
 
 conf = configure_file(
   configuration : conf_data,
