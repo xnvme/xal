@@ -78,6 +78,11 @@ xal_close(struct xal *xal)
 		return;
 	}
 
+	be = (struct xal_backend_base *)&xal->be;
+	if (be->close) {
+		be->close(xal);
+	}
+
 	xal_pool_unmap(&xal->inodes, !xal->shared_view);
 	xal_pool_unmap(&xal->extents, !xal->shared_view);
 
@@ -87,11 +92,6 @@ xal_close(struct xal *xal)
 			free(xal->state_shm_name);
 		}
 		munmap(xal->state, sizeof(struct xal_shared_state));
-	}
-
-	be = (struct xal_backend_base *)&xal->be;
-	if (be->close) {
-		be->close(xal);
 	}
 
 	free(xal);
