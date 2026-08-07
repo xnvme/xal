@@ -1,3 +1,5 @@
+#include <stdatomic.h>
+
 #define XAL_BE_FIEMAP_INOTIFY_RUNNING 1
 
 struct xal_inotify {
@@ -6,6 +8,7 @@ struct xal_inotify {
 	void *inode_map;  ///< Map of inodes from inotify watch descriptors
 	pthread_t watch_thread_id;
 	int flag;
+	atomic_bool stop;
 	xal_dirty_cb cb;
 	void *cb_args;
 };

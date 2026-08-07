@@ -35,16 +35,18 @@ xal_be_fiemap_inotify_close(struct xal_inotify *inotify)
 
 	inode_map = inotify->inode_map;
 
+	if (inotify->flag & XAL_BE_FIEMAP_INOTIFY_RUNNING) {
+		atomic_store(&inotify->stop, true);
+		pthread_join(inotify->watch_thread_id, NULL);
+		inotify->flag &= ~XAL_BE_FIEMAP_INOTIFY_RUNNING;
+	}
+
 	if (inode_map) {
 		kh_destroy(wd_to_inode, inode_map);
 	}
 
 	if (inotify->fd) {
 		close(inotify->fd);
-	}
-
-	if (inotify->flag & XAL_BE_FIEMAP_INOTIFY_RUNNING) {
-		pthread_cancel(inotify->watch_thread_id);
 	}
 }
 
@@ -57,6 +59,7 @@ xal_be_fiemap_inotify_init(struct xal_inotify *inotify, enum xal_watchmode watch
 	}
 
 	inotify->watch_mode = watch_mode;
+	atomic_init(&inotify->stop, false);
 
 	if (!inotify->watch_mode) {
 		XAL_DEBUG("INFO: Skipping xal_be_fiemap_inotify_init(), watch mode none given");
@@ -331,13 +334,7 @@ background_thread_start(void *arg)
 
 	be->inotify->flag |= XAL_BE_FIEMAP_INOTIFY_RUNNING;
 
-	err = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-	if (err) {
-		XAL_DEBUG("FAILED: pthread_setcancelstate(), exit thread; err(%d)", err);
-		goto exit_thread;
-	}
-
-	while (1) {
+	while (!atomic_load(&be->inotify->stop)) {
 		if (atomic_load(xal->dirty)) {
 			continue;
 		}
@@ -401,6 +398,7 @@ xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args)
 
 	be->inotify->cb = cb;
 	be->inotify->cb_args = cb_args;
+	atomic_store(&be->inotify->stop, false);
 
 	err = pthread_create(&be->inotify->watch_thread_id, NULL, &background_thread_start, xal);
 	if (err) {
@@ -435,15 +433,15 @@ xal_stop_watching_filesystem(struct xal *xal)
 		return -EINVAL;
 	}
 
-	if (be->inotify->flag & ~XAL_BE_FIEMAP_INOTIFY_RUNNING) {
+	if (!(be->inotify->flag & XAL_BE_FIEMAP_INOTIFY_RUNNING)) {
 		XAL_DEBUG("FAILED: thread is not running");
 		return -EINVAL;
 	}
 
-	pthread_cancel(be->inotify->watch_thread_id);
-	err = pthread_cancel(be->inotify->watch_thread_id);
+	atomic_store(&be->inotify->stop, true);
+	err = pthread_join(be->inotify->watch_thread_id, NULL);
 	if (err) {
-		XAL_DEBUG("FAILED: pthread_cancel(); err(%d)", err);
+		XAL_DEBUG("FAILED: pthread_join(); err(%d)", err);
 		return -err;
 	}
 
