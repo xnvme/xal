@@ -665,6 +665,7 @@ retrieve_and_decode_primary_superblock(struct xnvme_dev *dev, void *buf, struct 
 
 	cand->root_idx = XAL_POOL_IDX_NONE;
 	cand->dirty = &cand->_dirty_storage;
+	cand->seq_lock = &cand->_seq_lock_storage;
 
 	be = (struct xal_be_xfs *)&cand->be;
 

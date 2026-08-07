@@ -262,6 +262,7 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 
 		(*xal)->state = state;
 		(*xal)->dirty = &state->dirty;
+		(*xal)->seq_lock = &state->seq_lock;
 
 		state->type = opts->be;
 		state->sb = (*xal)->sb;
@@ -348,7 +349,7 @@ xal_is_dirty(struct xal *xal)
 int
 xal_get_seq_lock(struct xal *xal)
 {
-	return atomic_load(&xal->seq_lock);
+	return atomic_load(xal->seq_lock);
 }
 
 const struct xal_sb *
@@ -405,6 +406,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 
 	xal->state = state;
 	xal->dirty = &state->dirty;
+	xal->seq_lock = &state->seq_lock;
 	xal->sb = state->sb;
 
 	if (atomic_load(xal->dirty)) {

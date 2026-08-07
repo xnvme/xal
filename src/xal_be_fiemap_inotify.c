@@ -256,7 +256,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				path[dir_inode->namelen + 1 + strlen(event->name)] = '\0';
 
 				XAL_DEBUG("INFO: got full path of event: %s", path);
-				atomic_fetch_add(&xal->seq_lock, 1);
+				atomic_fetch_add(xal->seq_lock, 1);
 
 				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
 					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
@@ -294,7 +294,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				XAL_DEBUG("INFO: finished reprocessing inode:");
 				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
 
-				atomic_fetch_add(&xal->seq_lock, 1);
+				atomic_fetch_add(xal->seq_lock, 1);
 
 			} else if (event->mask & (IN_CREATE | IN_DELETE | IN_MOVE)) {
 				XAL_DEBUG("INFO: File system has changed, event mask:%s", mask_pp);
@@ -310,7 +310,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 	return 0;
 
 failed_with_lock:
-	atomic_fetch_add(&xal->seq_lock, 1);
+	atomic_fetch_add(xal->seq_lock, 1);
 
 	return err;
 }

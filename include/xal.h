@@ -21,6 +21,7 @@ struct xal_shared_state {
 	struct xal_sb sb;
 	char mountpoint[XAL_PATH_MAXLEN];
 	atomic_bool dirty;
+	atomic_int seq_lock; ///< Even when stable; odd while the pools are being rewritten in place
 };
 
 /**
@@ -40,7 +41,8 @@ struct xal {
 	uint8_t be[XAL_BACKEND_SIZE];
 	atomic_bool *dirty;      ///< Whether the file system has changed since last index; may point to external shared memory
 	atomic_bool _dirty_storage; ///< Backing store for dirty when shm_name is not set
-	atomic_int seq_lock;     ///< An uneven number indicates the struct is being modified and is not safe to read
+	atomic_int *seq_lock;    ///< An uneven number indicates the struct is being modified and is not safe to read; may point to external shared memory
+	atomic_int _seq_lock_storage; ///< Backing store for seq_lock when shm_name is not set
 	bool shared_view;        ///< If true, pool memory is owned externally; xal_close() will not unmap it
 	struct xal_shared_state *state; ///< Mapped shared state region; non-NULL when shm_name was set
 	char *state_shm_name;           ///< Name of the _state shm region; set by primary only, for unlink on close
