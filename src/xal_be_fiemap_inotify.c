@@ -358,7 +358,9 @@ background_thread_start(void *arg)
 exit_thread:
 	XAL_DEBUG("INFO: unlocked xal lock");
 
-	be->inotify->flag &= ~XAL_BE_FIEMAP_INOTIFY_RUNNING;
+	if (be->inotify) {
+		be->inotify->flag &= ~XAL_BE_FIEMAP_INOTIFY_RUNNING;
+	}
 	pthread_exit((void *)(intptr_t)err);
 }
 
