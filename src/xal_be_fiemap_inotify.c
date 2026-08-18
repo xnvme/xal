@@ -5,7 +5,6 @@
 #include <khash.h>
 #include <libxal.h>
 #include <linux/fs.h>
-#include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -323,6 +322,7 @@ background_thread_start(void *arg)
 {
 	struct xal *xal = arg;
 	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
+	int cb_seq = -1;
 	int err = 0;
 
 	XAL_DEBUG("INFO: starting background thread");
@@ -335,9 +335,28 @@ background_thread_start(void *arg)
 	be->inotify->flag |= XAL_BE_FIEMAP_INOTIFY_RUNNING;
 
 	while (!atomic_load(&be->inotify->stop)) {
-		if (atomic_load(xal->dirty)) {
+		int state = atomic_load(xal->index_state);
+
+		if (state == XAL_STATE_INDEXING) {
 			continue;
 		}
+
+		if (state == XAL_STATE_DIRTY) {
+			/* Notify at most once per tree version: fire only when seq is stable
+			 * and differs from the version the cb last fired at, so a mark that
+			 * survived an index this loop never observed still gets its cb. */
+			int seq = atomic_load(xal->seq_lock);
+
+			if (!(seq & 1) && seq != cb_seq) {
+				if (be->inotify->cb) {
+					be->inotify->cb(xal, be->inotify->cb_args);
+				}
+				cb_seq = seq;
+			}
+			continue;
+		}
+
+		cb_seq = -1;
 
 		err = check_events(xal, be->inotify);
 		if (err < 0) {
@@ -346,11 +365,8 @@ background_thread_start(void *arg)
 		}
 
 		if (err) {
-			XAL_DEBUG("INFO: Found breaking changes, setting xal->dirty to true");
-			atomic_store(xal->dirty, true);
-			if (be->inotify->cb) {
-				be->inotify->cb(xal, be->inotify->cb_args);
-			}
+			XAL_DEBUG("INFO: Found breaking changes, marking xal as dirty");
+			xal_mark_dirty(xal);
 		}
 
 	}

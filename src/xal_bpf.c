@@ -39,9 +39,9 @@ handle_event(void *__ctx, void *__data, size_t len)
 	case XAL_FS_UNFREEZE_EVENT:
 		XAL_DEBUG("WARNING: time(%ld) tgid/pid(%d/%d) cpu(%d) thawed the filesystem dev(%d,%d); unsafe to use extents",
 			e->ts_ns, e->tgid, e->pid, e->cpu, e->dev_major, e->dev_minor);
-		if (xal && xal->dirty) {
-			atomic_store(xal->dirty, true);
-			XAL_DEBUG("WARNING: setting xal->dirty to true");
+		if (xal && xal->index_state) {
+			xal_mark_dirty(xal);
+			XAL_DEBUG("WARNING: marking xal as dirty");
 		}
 		break;
 	default:
@@ -177,8 +177,8 @@ background_bpf_poll(void *arg)
 		if (current_lost > last_lost_events) {
 			XAL_DEBUG("WARNING: missed %lu BPF events! Marking cache as dirty for safety.",
 				  current_lost - last_lost_events);
-			if (xal && xal->dirty) {
-				atomic_store(xal->dirty, true);
+			if (xal && xal->index_state) {
+				xal_mark_dirty(xal);
 			}
 			last_lost_events = current_lost;
 		}

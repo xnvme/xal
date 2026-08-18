@@ -431,7 +431,7 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	}
 
 	cand->root_idx = XAL_POOL_IDX_NONE;
-	cand->dirty = &cand->_dirty_storage;
+	cand->index_state = &cand->_index_state_storage;
 	cand->seq_lock = &cand->_seq_lock_storage;
 
 	be = (struct xal_be_fiemap *)&cand->be;
@@ -1011,6 +1011,8 @@ xal_be_fiemap_index(struct xal *xal)
 		return -EINVAL;
 	}
 
+	atomic_store(xal->index_state, XAL_STATE_INDEXING);
+
 	XAL_DEBUG("INFO: waiting for xal lock");
 	atomic_fetch_add(xal->seq_lock, 1);
 
@@ -1071,10 +1073,9 @@ xal_be_fiemap_index(struct xal *xal)
 		XAL_DEBUG("INFO: reflink snapshot complete; clones under dir(%s)", be->reflink->dir);
 	}
 
-	atomic_store(xal->dirty, false);
-
 exit:
 	atomic_fetch_add(xal->seq_lock, 1);
+	xal_mark_index_done(xal, err);
 
 	return err;
 }
@@ -1127,7 +1128,7 @@ xal_build_lookup_hashmap(struct xal *xal)
 		return -EINVAL;
 	}
 
-	if (atomic_load(xal->dirty)) {
+	if (xal_is_dirty(xal)) {
 		XAL_DEBUG("FAILED: File system has changed");
 		return -ESTALE;
 	}

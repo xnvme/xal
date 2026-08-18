@@ -261,7 +261,7 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 		}
 
 		(*xal)->state = state;
-		(*xal)->dirty = &state->dirty;
+		(*xal)->index_state = &state->index_state;
 		(*xal)->seq_lock = &state->seq_lock;
 
 		state->type = opts->be;
@@ -290,7 +290,7 @@ _walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_da
 {
 	int err;
 
-	if (atomic_load(xal->dirty)) {
+	if (xal_is_dirty(xal)) {
 		XAL_DEBUG("FAILED: File system has changed");
 		return -ESTALE;
 	}
@@ -343,7 +343,27 @@ xal_get_root(struct xal *xal)
 bool
 xal_is_dirty(struct xal *xal)
 {
-	return atomic_load(xal->dirty);
+	return atomic_load(xal->index_state) != XAL_STATE_CLEAN;
+}
+
+void
+xal_mark_dirty(struct xal *xal)
+{
+	atomic_store(xal->index_state, XAL_STATE_DIRTY);
+}
+
+void
+xal_mark_index_done(struct xal *xal, int err)
+{
+	if (err) {
+		atomic_store(xal->index_state, XAL_STATE_DIRTY);
+		return;
+	}
+
+	// A mark landing mid-rebuild wins the exchange and survives the index.
+	int expected = XAL_STATE_INDEXING;
+
+	atomic_compare_exchange_strong(xal->index_state, &expected, XAL_STATE_CLEAN);
 }
 
 int
@@ -405,11 +425,11 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	}
 
 	xal->state = state;
-	xal->dirty = &state->dirty;
+	xal->index_state = &state->index_state;
 	xal->seq_lock = &state->seq_lock;
 	xal->sb = state->sb;
 
-	if (atomic_load(xal->dirty)) {
+	if (xal_is_dirty(xal)) {
 		err = -ESTALE;
 		goto unmap_state;
 	}
@@ -674,7 +694,7 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 		return -EINVAL;
 	}
 
-	if (atomic_load(xal->dirty)) {
+	if (xal_is_dirty(xal)) {
 		XAL_DEBUG("FAILED: File system has changed");
 		return -ESTALE;
 	}

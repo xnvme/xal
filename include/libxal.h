@@ -194,8 +194,7 @@ xal_get_root(struct xal *xal);
  * Returns true if breaking changes to the mounted file-system have been found, which
  * invalidates the representation of the file-system in the xal->root field.
  * 
- * @note If the xal struct was not opened with backend "fiemap", this will always
- * return false.
+ * @note If the xal struct was not opened with backend "fiemap", change detection is not supported.
  * 
  * @param xal The xal struct obtained when opened with xal_open()
  * 
@@ -204,6 +203,22 @@ xal_get_root(struct xal *xal);
  */
 bool
 xal_is_dirty(struct xal *xal);
+
+/**
+ * Mark the xal representation as dirty.
+ *
+ * Forces the dirty flag without waiting for the filesystem watcher, so a caller
+ * that just changed the filesystem (e.g. an allocating write) can guarantee the
+ * next extent resolution sees it as stale and re-indexes. Idempotent.
+ *
+ * Safe to call from any thread at any time; a mark that lands while xal_index() is
+ * rebuilding the index survives it, so the representation stays dirty and the change
+ * is observed by a further re-index.
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ */
+void
+xal_mark_dirty(struct xal *xal);
 
 /**
  * Returns the current value of the sequence lock.
@@ -272,9 +287,9 @@ int
 xal_index(struct xal *xal);
 
 /**
- * Callback invoked by the background watch thread immediately after the xal struct is marked
+ * Callback invoked by the background watch thread when it observes the xal struct becoming
  * dirty. Dirty means breaking filesystem changes (file creation, deletion, or rename) were
- * detected, and the in-memory representation is now stale.
+ * detected or marked via xal_mark_dirty(), and the in-memory representation is now stale.
  *
  * The callback is called from the watch thread; keep it short and thread-safe.
  *

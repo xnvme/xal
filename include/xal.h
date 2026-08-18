@@ -16,11 +16,17 @@ struct xal_backend_base {
 	void (*close)(struct xal *xal);
 };
 
+enum xal_state {
+	XAL_STATE_CLEAN = 0,	///< The representation matches the last indexed filesystem state
+	XAL_STATE_DIRTY = 1,	///< A breaking change occurred that no index has begun to observe
+	XAL_STATE_INDEXING = 2, ///< xal_index() is rebuilding the representation
+};
+
 struct xal_shared_state {
 	enum xal_backend type;
 	struct xal_sb sb;
 	char mountpoint[XAL_PATH_MAXLEN];
-	atomic_bool dirty;
+	atomic_int index_state; ///< One of enum xal_state
 	atomic_int seq_lock; ///< Even when stable; odd while the pools are being rewritten in place
 };
 
@@ -39,8 +45,8 @@ struct xal {
 	uint32_t root_idx;       ///< Index of the root inode in the inodes pool
 	struct xal_sb sb;
 	uint8_t be[XAL_BACKEND_SIZE];
-	atomic_bool *dirty;      ///< Whether the file system has changed since last index; may point to external shared memory
-	atomic_bool _dirty_storage; ///< Backing store for dirty when shm_name is not set
+	atomic_int *index_state; ///< One of enum xal_state; may point to external shared memory
+	atomic_int _index_state_storage; ///< Backing store for index_state when shm_name is not set
 	atomic_int *seq_lock;    ///< An uneven number indicates the struct is being modified and is not safe to read; may point to external shared memory
 	atomic_int _seq_lock_storage; ///< Backing store for seq_lock when shm_name is not set
 	bool shared_view;        ///< If true, pool memory is owned externally; xal_close() will not unmap it
@@ -50,3 +56,6 @@ struct xal {
 
 int
 search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode);
+
+void
+xal_mark_index_done(struct xal *xal, int err);

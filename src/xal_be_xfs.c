@@ -664,7 +664,7 @@ retrieve_and_decode_primary_superblock(struct xnvme_dev *dev, void *buf, struct 
 	}
 
 	cand->root_idx = XAL_POOL_IDX_NONE;
-	cand->dirty = &cand->_dirty_storage;
+	cand->index_state = &cand->_index_state_storage;
 	cand->seq_lock = &cand->_seq_lock_storage;
 
 	be = (struct xal_be_xfs *)&cand->be;
@@ -1746,12 +1746,14 @@ xal_be_xfs_index(struct xal *xal)
 		return -EINVAL;
 	}
 
+	atomic_store(xal->index_state, XAL_STATE_INDEXING);
+
 	xal_pool_clear(&xal->inodes);
 	xal_pool_clear(&xal->extents);
 
 	err = xal_pool_claim_inodes(&xal->inodes, 1, &xal->root_idx);
 	if (err) {
-		return err;
+		goto exit;
 	}
 
 	root = xal_inode_at(xal, xal->root_idx);
@@ -1765,10 +1767,10 @@ xal_be_xfs_index(struct xal *xal)
 	err = process_ino(xal, root->ino, root);
 	if (err) {
 		XAL_DEBUG("FAILED: process_ino(); err(%d)", err);
-		return err;
 	}
 
-	atomic_store(xal->dirty, false);
+exit:
+	xal_mark_index_done(xal, err);
 
 	return err;
 }
