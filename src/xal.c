@@ -219,6 +219,8 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 	if (!ns) {
 		err = -errno;
 		XAL_DEBUG("FAILED: xnvme_dev_get_ns(); err(%d)", err);
+		xal_close(*xal);
+		*xal = NULL;
 		return err;
 	}
 
