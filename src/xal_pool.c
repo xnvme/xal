@@ -108,7 +108,6 @@ xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t el
 			pool->memory = NULL;
 			goto failed_created;
 		}
-		memset(pool->memory, 0, nbytes);
 
 		pool->allocated = reserved;
 		pool->growby = reserved;
@@ -244,14 +243,11 @@ xal_pool_claim_extents(struct xal_pool *pool, size_t count, uint32_t *idx)
 int
 xal_pool_clear(struct xal_pool *pool)
 {
-	if (mprotect(pool->memory, pool->reserved * pool->element_size, PROT_READ | PROT_WRITE)) {
-		XAL_DEBUG("FAILED: mprotect(...); errno(%d)", errno);
-		return -errno;
-	}
-	memset(pool->memory, 0, pool->reserved * pool->element_size);
+	/* Indices are only handed out sequentially from free, so nothing past it was written.
+	 * allocated is left as it is, keeping the PROT_NONE guard beyond it. */
+	memset(pool->memory, 0, pool->free * pool->element_size);
 
 	pool->free = 0;
-	pool->allocated = 0;
 
 	return 0;
 }
