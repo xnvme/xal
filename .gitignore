@@ -41,9 +41,10 @@ TAGS
 *.stackdump
 
 # Dependency management
-/subprojects/packagecache/
+/subprojects/*
+!/subprojects/packagefiles
+!/subprojects/*.wrap
 *.cache
-*.wrap
 
 # CCache files
 .ccache/
