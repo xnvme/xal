@@ -601,6 +601,11 @@ xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_e
 		return -EINVAL;
 	}
 
+	if (!lba_blksze) {
+		XAL_DEBUG("SKIPPED: cannot convert to lba without lba blksze");
+		return -EINVAL;
+	}
+
 	output->start_offset = extent->start_offset * xal->sb.blocksize / lba_blksze;
 	output->size = extent->nblocks * xal->sb.blocksize / lba_blksze;
 	output->start_block = xal_fsbno_offset(xal, extent->start_block) / lba_blksze;
