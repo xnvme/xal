@@ -135,6 +135,72 @@ retrieve_mountpoint(const char *dev_uri, char *mntpnt)
 	return 0;
 }
 
+/**
+ * Create the shared state region for the given shm_name and publish it
+ *
+ * A secondary attaches using this region alone, so it carries the backend, superblock and
+ * mountpoint. On failure nothing is left behind under the name.
+ */
+static int
+publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoint,
+		     enum xal_backend be)
+{
+	char shm_name_state[XAL_PATH_MAXLEN + 9];
+	struct xal_shared_state *state;
+	int fd, err;
+
+	snprintf(shm_name_state, sizeof(shm_name_state), "%s_state", shm_name);
+
+	fd = shm_open(shm_name_state, O_CREAT | O_RDWR | O_EXCL, 0644);
+	if (fd < 0) {
+		XAL_DEBUG("FAILED: shm_open(%s); errno(%d)", shm_name_state, errno);
+		return -errno;
+	}
+
+	err = ftruncate(fd, sizeof(struct xal_shared_state));
+	if (err) {
+		XAL_DEBUG("FAILED: ftruncate(); errno(%d)", errno);
+		err = -errno;
+		close(fd);
+		shm_unlink(shm_name_state);
+		return err;
+	}
+
+	state =
+	    mmap(NULL, sizeof(struct xal_shared_state), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	close(fd);
+	if (state == MAP_FAILED) {
+		XAL_DEBUG("FAILED: mmap(); errno(%d)", errno);
+		err = -errno;
+		shm_unlink(shm_name_state);
+		return err;
+	}
+
+	xal->state_shm_name = strdup(shm_name_state);
+	if (!xal->state_shm_name) {
+		XAL_DEBUG("FAILED: strdup(); errno(%d)", errno);
+		munmap(state, sizeof(struct xal_shared_state));
+		shm_unlink(shm_name_state);
+		return -ENOMEM;
+	}
+
+	xal->state = state;
+	xal->index_state = &state->index_state;
+	xal->seq_lock = &state->seq_lock;
+
+	/* ftruncate() zero-fills, and XAL_STATE_CLEAN is zero, so the region would read as
+	 * an up-to-date index before one has been built. Mark it dirty here; xal_index()
+	 * clears it once there is something to attach to. */
+	atomic_store(&state->index_state, XAL_STATE_DIRTY);
+
+	state->type = be;
+	state->sb = xal->sb;
+	strncpy(state->mountpoint, mountpoint, XAL_PATH_MAXLEN - 1);
+	state->mountpoint[XAL_PATH_MAXLEN - 1] = '\0';
+
+	return 0;
+}
+
 int
 xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 {
@@ -232,55 +298,13 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 	(*xal)->sb.lba_blksze = 1U << ns->lbaf[fidx].ds;
 
 	if (opts->shm_name) {
-		char shm_name_state[XAL_PATH_MAXLEN + 9];
-		struct xal_shared_state *state;
-		int fd;
-
-		snprintf(shm_name_state, sizeof(shm_name_state), "%s_state", opts->shm_name);
-
-		fd = shm_open(shm_name_state, O_CREAT | O_RDWR | O_EXCL, 0644);
-		if (fd < 0) {
-			XAL_DEBUG("FAILED: shm_open(%s); errno(%d)", shm_name_state, errno);
-			xal_close(*xal);
-			return -errno;
-		}
-
-		err = ftruncate(fd, sizeof(struct xal_shared_state));
+		err = publish_shared_state(*xal, opts->shm_name, mountpoint, opts->be);
 		if (err) {
-			XAL_DEBUG("FAILED: ftruncate(); errno(%d)", errno);
-			err = -errno;
-			close(fd);
-			shm_unlink(shm_name_state);
+			XAL_DEBUG("FAILED: publish_shared_state(); err(%d)", err);
 			xal_close(*xal);
+			*xal = NULL;
 			return err;
 		}
-
-		state = mmap(NULL, sizeof(struct xal_shared_state), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-		close(fd);
-		if (state == MAP_FAILED) {
-			XAL_DEBUG("FAILED: mmap(); errno(%d)", errno);
-			err = -errno;
-			shm_unlink(shm_name_state);
-			xal_close(*xal);
-			return err;
-		}
-
-		(*xal)->state_shm_name = strdup(shm_name_state);
-		if (!(*xal)->state_shm_name) {
-			XAL_DEBUG("FAILED: strdup(); errno(%d)", errno);
-			munmap(state, sizeof(struct xal_shared_state));
-			xal_close(*xal);
-			return -ENOMEM;
-		}
-
-		(*xal)->state = state;
-		(*xal)->index_state = &state->index_state;
-		(*xal)->seq_lock = &state->seq_lock;
-
-		state->type = opts->be;
-		state->sb = (*xal)->sb;
-		strncpy(state->mountpoint, mountpoint, XAL_PATH_MAXLEN - 1);
-		state->mountpoint[XAL_PATH_MAXLEN - 1] = '\0';
 	}
 
 	return 0;
