@@ -201,6 +201,64 @@ publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoi
 	return 0;
 }
 
+/**
+ * A large part of this code is duplicated from xal_open(), but it allows
+ * users to open a xal struct with FIEMAP without the dependency on xNVMe.
+ * Note that as it does not set the superblock lba sizea, meaning a call
+ * to xal_extent_in_lba() would not work.
+ */
+int
+xal_open_from_uri(const char *uri, struct xal **xal, struct xal_opts *opts)
+{
+	struct xal_opts opts_default = {0};
+	char mountpoint[XAL_PATH_MAXLEN + 1] = {0};
+	int err;
+
+	if (!uri) {
+		return -EINVAL;
+	}
+
+	if (!opts) {
+		opts = &opts_default;
+	}
+
+	/* No device means no on-disk format to read, so FIEMAP is the only reachable backend. */
+	if (opts->be && (opts->be != XAL_BACKEND_FIEMAP)) {
+		XAL_DEBUG("FAILED: backend(%d) needs a device, use xal_open()", opts->be);
+		return -EINVAL;
+	}
+	opts->be = XAL_BACKEND_FIEMAP;
+
+	if (opts->mountpoint && strlen(opts->mountpoint)) {
+		strncpy(mountpoint, opts->mountpoint, XAL_PATH_MAXLEN);
+		mountpoint[XAL_PATH_MAXLEN] = '\0';
+	} else {
+		err = retrieve_mountpoint(uri, mountpoint);
+		if (err) {
+			XAL_DEBUG("FAILED: retrieve_mountpoint(%s); err(%d)", uri, err);
+			return err;
+		}
+	}
+
+	err = xal_be_fiemap_open(xal, mountpoint, opts);
+	if (err) {
+		XAL_DEBUG("FAILED: xal_be_fiemap_open(); err(%d)", err);
+		return err;
+	}
+
+	if (opts->shm_name) {
+		err = publish_shared_state(*xal, opts->shm_name, mountpoint, opts->be);
+		if (err) {
+			XAL_DEBUG("FAILED: publish_shared_state(); err(%d)", err);
+			xal_close(*xal);
+			*xal = NULL;
+			return err;
+		}
+	}
+
+	return 0;
+}
+
 int
 xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 {

@@ -251,6 +251,15 @@ xal_pp(struct xal *xal);
  * utilized to instantiate the 'struct xal' with a subset of the on-disk-format parsed to native
  * format.
  *
+ * When opts->shm_name is set, the pools are published under that name for other processes to
+ * read, and this process is the one expected to call xal_index(). The name must not already
+ * exist: the regions are created with O_EXCL and outlive their creator, so -EEXIST means the
+ * name is taken, by a live holder or by a remnant of one that died without unlinking. Readers
+ * attach with xal_from_shm() rather than by opening the device again.
+ *
+ * opts->be is in/out: left zero it is filled in with the detected backend and stays set. A caller
+ * reusing one struct xal_opts across devices must clear it between calls.
+ *
  * @param dev Pointer to xnvme device handled as retrieved with xnvme_dev_open()
  * @param xal Pointer
  * @param opts Pointer to options, see xal_opts
@@ -259,6 +268,21 @@ xal_pp(struct xal *xal);
  */
 int
 xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts);
+
+/**
+ * Open and decode the file-system meta-data of the mount holding the given device
+ *
+ * As xal_open(), but with no xnvme device. FIEMAP is then the only reachable backend, and
+ * sb.lba_blksze is left unset, so xal_extent_in_lba() returns -EINVAL on the resulting handle.
+ *
+ * @param uri The device to index; it must be mounted, unless opts->mountpoint says where
+ * @param xal Pointer
+ * @param opts Pointer to options, see xal_opts
+ *
+ * @return On success a 0 is returned. On error, negative errno is returned to indicate the error.
+ */
+int
+xal_open_from_uri(const char *uri, struct xal **xal, struct xal_opts *opts);
 
 void
 xal_close(struct xal *xal);
