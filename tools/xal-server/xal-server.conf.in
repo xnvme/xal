@@ -1,0 +1,27 @@
+# This configuration file should be written in TOML format.
+
+# CRITICAL = 0, WARNING = 1, NOTICE = 2, INFO = 3, DEBUG = 4
+log_level = 2
+
+# Devices is a list of tables. Each entry needs:
+#
+#   uri        the block device to index; it must be mounted, since xal-server uses the
+#              FIEMAP backend
+#   shm_name   the POSIX shared memory name the index is published under. Readers pass this
+#              to xal_from_shm(), so it is the interface -- keep it stable.
+#
+# and optionally:
+#
+#   mountpoint where the device is mounted. Looked up in /proc/mounts when omitted.
+#   subtree    an absolute path at or under the mountpoint to restrict the index to.
+#
+# Example:
+# devices = [
+#   { uri = "/dev/nvme0n1", shm_name = "/xal_dev0" },
+#   { uri = "/dev/nvme0n2", shm_name = "/xal_dev1", mountpoint = "/mnt/data", subtree = "/mnt/data/videos" },
+# ]
+devices = []
+
+[xal]
+# none = 0, dirty detection = 1, extent update = 2, reflink snapshot = 3
+watchmode = 2

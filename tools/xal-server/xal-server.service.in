@@ -1,0 +1,12 @@
+[Unit]
+Description=xal index server
+After=local-fs.target
+
+[Service]
+Type=simple
+StandardOutput=journal
+StandardError=journal
+ExecStart=@bindir@/xal-server --config @config@
+
+[Install]
+WantedBy=multi-user.target

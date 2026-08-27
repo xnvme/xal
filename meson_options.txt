@@ -1,1 +1,2 @@
 option('debug-logging', type: 'boolean', value: true)
+option('xal-server', type: 'feature', value: 'auto', description: 'Build xal-server; needs the tomlc17 subproject')

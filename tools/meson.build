@@ -14,3 +14,5 @@ xal_snapshot_hold_exe = executable(
   install_rpath: xallib_rpath,
   install: true,
 )
+
+subdir('xal-server')
