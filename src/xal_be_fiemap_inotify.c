@@ -5,6 +5,7 @@
 #include <khash.h>
 #include <libxal.h>
 #include <linux/fs.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,6 +20,11 @@
 
 #define XAL_INOTIFY_NOCHANGE 0
 #define XAL_INOTIFY_REINDEX 1
+
+/* Bounds how long the watch thread sleeps when it has nothing to do. It also bounds how long
+ * xal_be_fiemap_inotify_close() waits in pthread_join(), and how late an externally marked
+ * dirty flag is noticed, so it trades those two against the wakeup rate. */
+#define XAL_INOTIFY_POLL_TIMEOUT_MS 100
 
 KHASH_MAP_INIT_INT64(wd_to_inode, struct xal_inode *);
 
@@ -334,6 +340,7 @@ background_thread_start(void *arg)
 {
 	struct xal *xal = arg;
 	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
+	struct pollfd pfd;
 	int cb_seq = -1;
 	int err = 0;
 
@@ -346,10 +353,16 @@ background_thread_start(void *arg)
 
 	be->inotify->flag |= XAL_BE_FIEMAP_INOTIFY_RUNNING;
 
+	pfd.fd = be->inotify->fd;
+	pfd.events = POLLIN;
+
 	while (!atomic_load(&be->inotify->stop)) {
 		int state = atomic_load(xal->index_state);
 
 		if (state == XAL_STATE_INDEXING) {
+			/* Someone else is rebuilding the pools. Nothing here can make that
+			 * finish sooner, so wait rather than spin on the state. */
+			poll(NULL, 0, XAL_INOTIFY_POLL_TIMEOUT_MS);
 			continue;
 		}
 
@@ -364,11 +377,33 @@ background_thread_start(void *arg)
 					be->inotify->cb(xal, be->inotify->cb_args);
 				}
 				cb_seq = seq;
+				continue;
 			}
+
+			/* Already notified for this version, and the queue cannot help: events
+			 * pending there would make a poll on the fd return at once. */
+			poll(NULL, 0, XAL_INOTIFY_POLL_TIMEOUT_MS);
 			continue;
 		}
 
 		cb_seq = -1;
+
+		/* The fd is non-blocking, so without this the read() below returns EAGAIN
+		 * immediately and the loop becomes a busy poll. The timeout is what lets a
+		 * dirty mark set elsewhere be noticed while no event ever arrives. */
+		err = poll(&pfd, 1, XAL_INOTIFY_POLL_TIMEOUT_MS);
+		if (err < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			XAL_DEBUG("FAILED: poll(); errno(%d), exit thread", errno);
+			err = -errno;
+			xal_mark_dirty(xal);
+			goto exit_thread;
+		}
+		if (!err) {
+			continue;
+		}
 
 		err = check_events(xal, be->inotify);
 		if (err < 0) {
