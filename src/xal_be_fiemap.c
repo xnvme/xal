@@ -760,10 +760,22 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 		struct xal_inode *dentry = xal_inode_at(xal, inode->content.dentries.inodes_idx + inode->content.dentries.count);
 
 		char dentry_path[strlen(path) + 1 + strlen(entry_name) + 1];
+		size_t dentry_pathlen;
+
 		snprintf(dentry_path, sizeof(dentry_path), "%s/%s", path, entry_name);
 
-		strcpy(dentry->name, dentry_path);
-		dentry->namelen = strlen(dentry->name);
+		/* This backend keeps the whole path in name, which is sized for a single one,
+		 * and the field is followed by parent_idx and the next pool element. */
+		dentry_pathlen = strlen(dentry_path);
+		if (dentry_pathlen > XAL_INODE_NAME_MAXLEN) {
+			XAL_DEBUG("FAILED: path(%s) is %zu bytes, at most %d fit", dentry_path,
+				  dentry_pathlen, XAL_INODE_NAME_MAXLEN);
+			err = -ENAMETOOLONG;
+			goto exit;
+		}
+
+		memcpy(dentry->name, dentry_path, dentry_pathlen + 1);
+		dentry->namelen = dentry_pathlen;
 		dentry->parent_idx = xal_inode_idx(xal, inode);
 
 		inode->content.dentries.count += 1;
