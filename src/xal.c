@@ -507,14 +507,15 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	snprintf(shm_name_state, sizeof(shm_name_state), "%s_state", shm_name);
 
 	/* STATE */
-	shm_fd = shm_open(shm_name_state, O_RDONLY, 0);
+	shm_fd = shm_open(shm_name_state, O_RDWR, 0);
 	if (shm_fd < 0) {
 		err = -errno;
 		fprintf(stderr, "Failed: shm_open(state); err(%d)\n", err);
 		goto failed;
 	}
 
-	state = mmap(NULL, sizeof(struct xal_shared_state), PROT_READ, MAP_SHARED, shm_fd, 0);
+	state = mmap(NULL, sizeof(struct xal_shared_state), PROT_READ | PROT_WRITE, MAP_SHARED,
+		     shm_fd, 0);
 	close(shm_fd);
 	shm_fd = -1;
 
