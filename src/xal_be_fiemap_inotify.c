@@ -17,6 +17,9 @@
 #include <xal_be_fiemap.h>
 #include <xal_be_fiemap_inotify.h>
 
+#define XAL_INOTIFY_NOCHANGE 0
+#define XAL_INOTIFY_REINDEX 1
+
 KHASH_MAP_INIT_INT64(wd_to_inode, struct xal_inode *);
 
 int
@@ -193,6 +196,12 @@ inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
 	return wrtn;
 }
 
+/**
+ * Drain the inotify queue, applying incrementally what can be applied
+ *
+ * @return On success XAL_INOTIFY_NOCHANGE or XAL_INOTIFY_REINDEX is returned, the latter asking
+ * the caller for a full re-index. On error, negative errno is returned and the watch is over.
+ */
 static int
 check_events(struct xal *xal, struct xal_inotify *inotify)
 {
@@ -224,9 +233,11 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 
 			if (inotify->watch_mode == XAL_WATCHMODE_DIRTY_DETECTION) {
 				XAL_DEBUG("INFO: File system has changed;");
-				return 1;
+				return XAL_INOTIFY_REINDEX;
 			}
 
+			/* The only fatal one: the filesystem is gone, so there is neither
+			 * anything left to watch nor anything a re-index could recover. */
 			if (event->mask & IN_UNMOUNT) {
 				XAL_DEBUG("FAILED: File system has been unmounted");
 				return -EINVAL;
@@ -236,7 +247,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				iter = kh_get(wd_to_inode, inode_map, wd);
 				if (iter == kh_end(inode_map)) {
 					XAL_DEBUG("FAILED: kh_get(%d) for event with name(%s)", wd, event->name);
-					return -EINVAL;
+					return XAL_INOTIFY_REINDEX;
 				}
 
 				XAL_DEBUG("INFO: found watch descriptor(%d) for event with name(%s)", wd, event->name);
@@ -244,13 +255,13 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				dir_inode = kh_val(inode_map, iter);
 				if (!xal_inode_is_dir(dir_inode)) {
 					XAL_DEBUG("FAILED: found inode(%s) is not a directory", dir_inode->name);
-					return -EINVAL;
+					return XAL_INOTIFY_REINDEX;
 				}
 
 				if (dir_inode->namelen + 1 + strlen(event->name) + 1 > sizeof(path)) {
 					XAL_DEBUG("FAILED: event(%s) full path too long(%zu)",
 							event->name, dir_inode->namelen + 1 + strlen(event->name) + 1);
-					return -EINVAL;
+					return XAL_INOTIFY_REINDEX;
 				}
 				memcpy(path, dir_inode->name, dir_inode->namelen);
 				path[dir_inode->namelen] = '/';
@@ -271,7 +282,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 
 				if (!inode) {
 					XAL_DEBUG("FAILED: could not find child with name(%s)", event->name);
-					err = -EINVAL;
+					err = XAL_INOTIFY_REINDEX;
 					goto failed_with_lock;
 				}
 
@@ -281,6 +292,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				err = xal_be_fiemap_process_inode_file(xal, path, inode);
 				if (err) {
 					XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_file(); err(%d)", err);
+					err = XAL_INOTIFY_REINDEX;
 					goto failed_with_lock;
 				}
 
@@ -288,7 +300,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				err = stat(path, &st);
 				if (err) {
 					XAL_DEBUG("FAILED: stat(%s) errno(%d) while getting new file size", path, errno);
-					err = -errno;
+					err = XAL_INOTIFY_REINDEX;
 					goto failed_with_lock;
 				}
 				inode->size = st.st_size;
@@ -300,7 +312,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 
 			} else if (event->mask & (IN_CREATE | IN_DELETE | IN_MOVE)) {
 				XAL_DEBUG("INFO: File system has changed, event mask:%s", mask_pp);
-				return 1;
+				return XAL_INOTIFY_REINDEX;
 			}
 
 			i += sizeof(struct inotify_event) + event->len;
@@ -309,7 +321,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 		len = read(inotify->fd, buf, sizeof buf);
 	}
 
-	return 0;
+	return XAL_INOTIFY_NOCHANGE;
 
 failed_with_lock:
 	atomic_fetch_add(xal->seq_lock, 1);
@@ -361,6 +373,9 @@ background_thread_start(void *arg)
 		err = check_events(xal, be->inotify);
 		if (err < 0) {
 			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_check_events(), exit thread; err(%d)", err);
+			/* Nothing re-indexes once this loop is left, so leave the index dirty:
+			 * readers get -ESTALE instead of extents for a vanished filesystem. */
+			xal_mark_dirty(xal);
 			goto exit_thread;
 		}
 
