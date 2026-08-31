@@ -484,6 +484,9 @@ xal_inode_is_file(struct xal_inode *inode);
  * If xal is opened with XAL_FILE_LOOKUPMODE_HASHMAP, this will be a constant
  * time lookup. Else, it will search through the tree at xal->root to find the
  * inode.
+ *
+ * In hashmap mode a lookup racing xal_index() in another thread of the same process can compare
+ * against a key that the re-index has already freed. Serialising the two avoids it.
  * 
  * @param xal The xal struct obtained when opened with xal_open()
  * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should

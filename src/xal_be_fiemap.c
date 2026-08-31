@@ -34,6 +34,67 @@ KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
 #define XAL_SNAPSHOT_ENTRY_MAXLEN (XAL_PATH_MAXLEN + 64)
 
 /**
+ * Insert the given path into the path-to-inode map
+ *
+ * The map keys are assembled paths, not pointers into the inode pool, so the map owns a copy of
+ * the given path. Use path_map_clear() / path_map_destroy() to release them.
+ */
+static int
+path_map_insert(khash_t(path_to_inode) *map, const char *path, struct xal_inode *inode)
+{
+	khiter_t iter;
+	char *key;
+	int err;
+
+	key = strdup(path);
+	if (!key) {
+		XAL_DEBUG("FAILED: strdup(); errno(%d)", errno);
+		return -ENOMEM;
+	}
+
+	iter = kh_put(path_to_inode, map, key, &err);
+	if (err < 0) {
+		XAL_DEBUG("FAILED: kh_put(%s); err(%d)", path, err);
+		free(key);
+		return -ENOMEM;
+	}
+	if (err == 0) { ///< The path is already mapped; keep the key already in the map
+		free(key);
+	}
+
+	kh_value(map, iter) = inode;
+
+	return 0;
+}
+
+static void
+path_map_clear(khash_t(path_to_inode) *map)
+{
+	if (!map) {
+		return;
+	}
+
+	for (khiter_t iter = kh_begin(map); iter != kh_end(map); ++iter) {
+		if (kh_exist(map, iter)) {
+			free((char *)kh_key(map, iter));
+		}
+	}
+
+	kh_clear(path_to_inode, map);
+}
+
+static void
+path_map_destroy(khash_t(path_to_inode) *map)
+{
+	if (!map) {
+		return;
+	}
+
+	path_map_clear(map);
+	kh_destroy(path_to_inode, map);
+}
+
+/**
  * Reflink-snapshot state (XAL_WATCHMODE_REFLINK_SNAPSHOT).
  *
  * At index time every regular file the walk visits is reflink-cloned into a private shadow
@@ -338,9 +399,8 @@ xal_be_fiemap_close(struct xal *xal)
 
 	inode_map = be->path_inode_map;
 
-	if (be->path_inode_map) {
-		kh_destroy(path_to_inode, inode_map);
-	}
+	path_map_destroy(inode_map);
+	be->path_inode_map = NULL;
 
 	return;
 }
@@ -788,18 +848,11 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 	}
 
 	if (be->path_inode_map) {
-		khash_t(path_to_inode) *map = be->path_inode_map;
-		khiter_t iter;
-
-		iter = kh_put(path_to_inode, map, inode->name, &err);
-		if (err < 0) {
-			XAL_DEBUG("FAILED: kh_put(); err(%d)", err);
-			err = -EIO;
+		err = path_map_insert(be->path_inode_map, path, inode);
+		if (err) {
+			XAL_DEBUG("FAILED: path_map_insert(%s); err(%d)", path, err);
 			goto exit;
 		}
-
-		kh_value(map, iter) = inode;
-		err = 0;
 	}
 
 exit:
@@ -935,15 +988,11 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 	close(fd);
 
 	if (be->path_inode_map) {
-		khash_t(path_to_inode) *map = be->path_inode_map;
-		khiter_t iter;
-
-		iter = kh_put(path_to_inode, map, inode->name, &err);
-		if (err < 0) {
-			XAL_DEBUG("FAILED: kh_put(); err(%d)", err);
-			return -EIO;
+		err = path_map_insert(be->path_inode_map, path, inode);
+		if (err) {
+			XAL_DEBUG("FAILED: path_map_insert(%s); err(%d)", path, err);
+			return err;
 		}
-		kh_value(map, iter) = inode;
 	}
 
 	return 0;
@@ -1037,6 +1086,10 @@ xal_be_fiemap_index(struct xal *xal)
 	xal_pool_clear(&xal->inodes);
 	xal_pool_clear(&xal->extents);
 
+	// The map points into the pools just cleared; the walk repopulates it, but it
+	// frees the keys a concurrent kh_get() may be comparing against; see xal_get_inode()
+	path_map_clear(be->path_inode_map);
+
 	if (be->inotify) {
 		err = xal_be_fiemap_inotify_drain(be->inotify);
 		if (err) {
@@ -1102,17 +1155,14 @@ static int
 build_hashmap_walk(struct xal *xal, struct xal_inode *inode)
 {
 	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
-	khash_t(path_to_inode) *map = be->path_inode_map;
-	khiter_t iter;
 	int err;
 
 	if (inode->namelen > 0) {
-		iter = kh_put(path_to_inode, map, inode->name, &err);
-		if (err < 0) {
-			XAL_DEBUG("FAILED: kh_put(%s); err(%d)", inode->name, err);
-			return -EIO;
+		err = path_map_insert(be->path_inode_map, inode->name, inode);
+		if (err) {
+			XAL_DEBUG("FAILED: path_map_insert(%s); err(%d)", inode->name, err);
+			return err;
 		}
-		kh_value(map, iter) = inode;
 	}
 
 	if (xal_inode_is_dir(inode)) {
@@ -1151,9 +1201,8 @@ xal_build_lookup_hashmap(struct xal *xal)
 		return -ESTALE;
 	}
 
-	if (be->path_inode_map) {
-		kh_destroy(path_to_inode, be->path_inode_map);
-	}
+	path_map_destroy(be->path_inode_map);
+	be->path_inode_map = NULL;
 
 	be->path_inode_map = kh_init(path_to_inode);
 	if (!be->path_inode_map) {
@@ -1164,7 +1213,7 @@ xal_build_lookup_hashmap(struct xal *xal)
 	err = build_hashmap_walk(xal, xal_inode_at(xal, xal->root_idx));
 	if (err) {
 		XAL_DEBUG("FAILED: build_hashmap_walk(); err(%d)", err);
-		kh_destroy(path_to_inode, be->path_inode_map);
+		path_map_destroy(be->path_inode_map);
 		be->path_inode_map = NULL;
 		return err;
 	}
