@@ -36,6 +36,7 @@
 
 #define XAL_INODE_NAME_MAXLEN 255
 #define XAL_PATH_MAXLEN 255
+#define XAL_INODE_PATH_MAXLEN 4096
 #define XAL_POOL_IDX_NONE UINT32_MAX
 
 enum xal_backend {
@@ -422,8 +423,40 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno);
 int
 xal_from_shm(const char *shm_name, struct xal **out);
 
+/**
+ * Print the path of the given inode to stdout
+ *
+ * The path is printed relative to the root of the indexed tree, and nothing is printed for the
+ * root itself. That is what lets a caller prefix a root of its own; 'xal --find' prints the
+ * device URI. This holds for the XFS backend only, since the FIEMAP backend stores the whole
+ * path in 'struct xal_inode', so the path is repeated for every ancestor.
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ * @param inode The inode to print the path of
+ *
+ * @return The number of characters printed.
+ */
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode);
+
+/**
+ * Assemble the absolute path of the given inode into the given buffer.
+ *
+ * The path is assembled by walking the parent chain to the root of the indexed tree, and is given
+ * as if the filesystem was mounted at root ("/"). This works for the XFS backend only, since the
+ * FIEMAP backend stores the whole path in 'struct xal_inode', not the leaf name.
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ * @param inode The inode to assemble the path of
+ * @param buf Buffer receiving the nul-terminated path; the XFS backend indexes trees of any depth,
+ * so a path can be longer than XAL_INODE_PATH_MAXLEN, and -ENAMETOOLONG is returned
+ * @param buf_nbytes Size of 'buf' in bytes, including room for nul-termination
+ *
+ * @return On success, the length of the path written, not counting nul-termination, is returned.
+ * On error, negative errno is returned to indicate the error.
+ */
+int
+xal_inode_path(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_nbytes);
 
 /**
  * Determine if the given inode is a directory

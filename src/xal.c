@@ -687,6 +687,93 @@ failed:
 	return err;
 }
 
+/**
+ * Write the path of the given inode into 'buf', appending to the 'nbytes' bytes already there
+ */
+static int
+inode_path_assemble(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_nbytes,
+		    size_t *nbytes)
+{
+	uint32_t inode_idx = xal_inode_idx(xal, inode);
+	int err;
+
+	if (inode->parent_idx == XAL_POOL_IDX_NONE) {
+		return 0;
+	}
+
+	if (inode_idx <= inode->parent_idx) {
+		XAL_DEBUG("FAILED: malformed parent index(inode_idx <= parent_idx)");
+		return -EINVAL;
+	}
+
+	err = inode_path_assemble(xal, xal_inode_at(xal, inode->parent_idx), buf, buf_nbytes, nbytes);
+	if (err) {
+		return err;
+	}
+
+	if ((*nbytes + 1 + inode->namelen + 1) > buf_nbytes) {
+		XAL_DEBUG("FAILED: path does not fit in buf_nbytes(%zu)", buf_nbytes);
+		return -ENAMETOOLONG;
+	}
+
+	buf[*nbytes] = '/';
+	memcpy(buf + *nbytes + 1, inode->name, inode->namelen);
+	*nbytes += 1 + inode->namelen;
+	buf[*nbytes] = '\0';
+
+	return 0;
+}
+
+int
+xal_inode_path(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_nbytes)
+{
+	struct xal_backend_base *be;
+	const char *basepath = "";
+	size_t nbytes;
+	int err;
+
+	if (!xal || !inode || !buf || !buf_nbytes) {
+		XAL_DEBUG("FAILED: invalid arguments");
+		return -EINVAL;
+	}
+
+	if (xal_is_dirty(xal)) {
+		XAL_DEBUG("FAILED: File system has changed");
+		return -ESTALE;
+	}
+
+	be = (struct xal_backend_base *)&xal->be;
+	if (be->type == XAL_BACKEND_FIEMAP) {
+		struct xal_be_fiemap *fiemap_be = (struct xal_be_fiemap *)&xal->be;
+
+		basepath = fiemap_be->subtree ? fiemap_be->subtree : fiemap_be->mountpoint;
+	}
+
+	nbytes = strlen(basepath);
+	if ((nbytes + 1) > buf_nbytes) {
+		XAL_DEBUG("FAILED: basepath does not fit in buf_nbytes(%zu)", buf_nbytes);
+		return -ENAMETOOLONG;
+	}
+	memcpy(buf, basepath, nbytes + 1);
+
+	err = inode_path_assemble(xal, inode, buf, buf_nbytes, &nbytes);
+	if (err) {
+		XAL_DEBUG("FAILED: inode_path_assemble(); err(%d)", err);
+		return err;
+	}
+
+	/* The root of a tree without a basepath, that is, the XFS backend */
+	if (!nbytes) {
+		if (buf_nbytes < 2) {
+			return -ENAMETOOLONG;
+		}
+		buf[nbytes++] = '/';
+		buf[nbytes] = '\0';
+	}
+
+	return (int)nbytes;
+}
+
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode)
 {
