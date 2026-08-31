@@ -39,7 +39,7 @@ enum xal_state {
  * contents mean: changing xal_inode.name from an assembled path to a leaf name leaves every size
  * and offset intact and still requires a bump.
  */
-#define XAL_SHM_VERSION 1
+#define XAL_SHM_VERSION 2
 
 struct xal_shared_state {
 	_Atomic uint64_t magic; ///< XAL_SHM_MAGIC, stored last, so zero means not yet published

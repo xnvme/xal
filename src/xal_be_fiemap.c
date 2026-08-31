@@ -819,23 +819,23 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 
 		struct xal_inode *dentry = xal_inode_at(xal, inode->content.dentries.inodes_idx + inode->content.dentries.count);
 
-		char dentry_path[strlen(path) + 1 + strlen(entry_name) + 1];
-		size_t dentry_pathlen;
+		size_t entry_namelen = strlen(entry_name);
+
+		char dentry_path[strlen(path) + 1 + entry_namelen + 1];
 
 		snprintf(dentry_path, sizeof(dentry_path), "%s/%s", path, entry_name);
 
-		/* This backend keeps the whole path in name, which is sized for a single one,
-		 * and the field is followed by parent_idx and the next pool element. */
-		dentry_pathlen = strlen(dentry_path);
-		if (dentry_pathlen > XAL_INODE_NAME_MAXLEN) {
-			XAL_DEBUG("FAILED: path(%s) is %zu bytes, at most %d fit", dentry_path,
-				  dentry_pathlen, XAL_INODE_NAME_MAXLEN);
+		/* Only the leaf name is stored; the path is assembled on demand from the
+		 * parent chain, see xal_inode_path(). */
+		if (entry_namelen > XAL_INODE_NAME_MAXLEN) {
+			XAL_DEBUG("FAILED: name(%s) is %zu bytes, at most %d fit", entry_name,
+				  entry_namelen, XAL_INODE_NAME_MAXLEN);
 			err = -ENAMETOOLONG;
 			goto exit;
 		}
 
-		memcpy(dentry->name, dentry_path, dentry_pathlen + 1);
-		dentry->namelen = dentry_pathlen;
+		memcpy(dentry->name, entry_name, entry_namelen + 1);
+		dentry->namelen = entry_namelen;
 		dentry->parent_idx = xal_inode_idx(xal, inode);
 
 		inode->content.dentries.count += 1;
@@ -1114,6 +1114,7 @@ xal_be_fiemap_index(struct xal *xal)
 	root->ino = xal->sb.rootino;
 	root->ftype = XAL_ODF_DIR3_FT_DIR;
 	root->namelen = 0;
+	root->name[0] = '\0';
 	root->parent_idx = XAL_POOL_IDX_NONE;
 	root->content.extents.count = 0;
 	root->content.dentries.count = 0;
@@ -1152,24 +1153,29 @@ exit:
 }
 
 static int
-build_hashmap_walk(struct xal *xal, struct xal_inode *inode)
+build_hashmap_walk(struct xal *xal, struct xal_inode *inode, char *path, size_t path_nbytes)
 {
 	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
 	int err;
 
-	if (inode->namelen > 0) {
-		err = path_map_insert(be->path_inode_map, inode->name, inode);
-		if (err) {
-			XAL_DEBUG("FAILED: path_map_insert(%s); err(%d)", inode->name, err);
-			return err;
-		}
+	err = xal_inode_path(xal, inode, path, path_nbytes);
+	if (err < 0) {
+		XAL_DEBUG("FAILED: xal_inode_path(%s); err(%d)", inode->name, err);
+		return err;
+	}
+
+	err = path_map_insert(be->path_inode_map, path, inode);
+	if (err) {
+		XAL_DEBUG("FAILED: path_map_insert(%s); err(%d)", path, err);
+		return err;
 	}
 
 	if (xal_inode_is_dir(inode)) {
 		for (uint32_t i = 0; i < inode->content.dentries.count; i++) {
 			struct xal_inode *child = xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
 
-			err = build_hashmap_walk(xal, child);
+			/* One buffer for the whole walk; the key is copied before recursing */
+			err = build_hashmap_walk(xal, child, path, path_nbytes);
 			if (err) {
 				return err;
 			}
@@ -1183,6 +1189,7 @@ int
 xal_build_lookup_hashmap(struct xal *xal)
 {
 	struct xal_be_fiemap *be;
+	char path[XAL_INODE_PATH_MAXLEN + 1];
 	int err;
 
 	if (!xal) {
@@ -1210,7 +1217,7 @@ xal_build_lookup_hashmap(struct xal *xal)
 		return -ENOMEM;
 	}
 
-	err = build_hashmap_walk(xal, xal_inode_at(xal, xal->root_idx));
+	err = build_hashmap_walk(xal, xal_inode_at(xal, xal->root_idx), path, sizeof(path));
 	if (err) {
 		XAL_DEBUG("FAILED: build_hashmap_walk(); err(%d)", err);
 		path_map_destroy(be->path_inode_map);

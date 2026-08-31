@@ -113,7 +113,7 @@ struct xal_inode {
 	union xal_inode_content content;
 	uint8_t ftype;			      ///< File-type (directory, filename, symlink etc.)
 	uint8_t namelen;		      ///< Length of the name; not counting nul-termination
-	char name[XAL_INODE_NAME_MAXLEN + 1]; ///< Name; not including nul-termination
+	char name[XAL_INODE_NAME_MAXLEN + 1]; ///< Leaf name of the entry, nul-terminated; not a path, see xal_inode_path()
 	uint8_t reserved[22];
 	uint32_t parent_idx;
 };
@@ -426,10 +426,10 @@ xal_from_shm(const char *shm_name, struct xal **out);
 /**
  * Print the path of the given inode to stdout
  *
- * The path is printed relative to the root of the indexed tree, and nothing is printed for the
- * root itself. That is what lets a caller prefix a root of its own; 'xal --find' prints the
- * device URI. This holds for the XFS backend only, since the FIEMAP backend stores the whole
- * path in 'struct xal_inode', so the path is repeated for every ancestor.
+ * The path is printed relative to the root of the indexed tree, that is, without the basepath
+ * that xal_inode_path() prefixes for the FIEMAP backend, and nothing is printed for the root
+ * itself. That is what lets a caller prefix a root of its own; 'xal --find' prints the device
+ * URI.
  *
  * @param xal The xal struct obtained when opened with xal_open()
  * @param inode The inode to print the path of
@@ -442,14 +442,16 @@ xal_inode_path_pp(struct xal *xal, struct xal_inode *inode);
 /**
  * Assemble the absolute path of the given inode into the given buffer.
  *
- * The path is assembled by walking the parent chain to the root of the indexed tree, and is given
- * as if the filesystem was mounted at root ("/"). This works for the XFS backend only, since the
- * FIEMAP backend stores the whole path in 'struct xal_inode', not the leaf name.
+ * 'struct xal_inode' stores the leaf name of the entry; the path is assembled by walking the
+ * parent chain to the root of the indexed tree. For the FIEMAP backend it is prefixed with the
+ * indexed root on the local filesystem (the mountpoint, or opts.subtree when given), for the XFS
+ * backend it is given as if the filesystem was mounted at root ("/").
  *
  * @param xal The xal struct obtained when opened with xal_open()
  * @param inode The inode to assemble the path of
- * @param buf Buffer receiving the nul-terminated path; the XFS backend indexes trees of any depth,
- * so a path can be longer than XAL_INODE_PATH_MAXLEN, and -ENAMETOOLONG is returned
+ * @param buf Buffer receiving the nul-terminated path; XAL_INODE_PATH_MAXLEN + 1 bytes holds any
+ * path the FIEMAP backend can index, that being a path on a mounted filesystem. The XFS backend
+ * indexes trees of any depth, so a path there can be longer, and -ENAMETOOLONG is returned
  * @param buf_nbytes Size of 'buf' in bytes, including room for nul-termination
  *
  * @return On success, the length of the path written, not counting nul-termination, is returned.

@@ -261,7 +261,7 @@ main(int argc, char *argv[])
 			goto exit;
 		}
 
-		printf("'%s':\n", inode->name);
+		printf("'%s':\n", args.filename);
 		pp_inode_extents(xal, inode);
 	}
 

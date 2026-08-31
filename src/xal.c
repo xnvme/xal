@@ -849,14 +849,7 @@ compare_name_to_inode(const void *key, const void *elem)
 	const char *component = key;
 	const struct xal_inode *inode = elem;
 
-	const char *basename = strrchr(inode->name, '/');
-	if (basename) {
-		basename++;
-	} else {
-		basename = inode->name;
-	}
-
-	return strcmp(component, basename);
+	return strcmp(component, inode->name);
 }
 
 int
