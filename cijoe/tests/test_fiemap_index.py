@@ -6,6 +6,7 @@ They need the populated filesystem mounted from ``xal.dev_path``, as the second 
 prep_and_test.yaml leaves it, and skip otherwise.
 """
 
+import errno
 from pathlib import Path
 
 import pytest
@@ -69,3 +70,40 @@ def test_deep_path_hashmap(cijoe):
     assert not lookup(
         cijoe, f"{mountpoint}/{DEEP_FILE}", "--backend fiemap --file_lookup_map"
     )
+
+
+def test_root(cijoe):
+    """Resolve the root of the indexed tree, the mountpoint, where the lookup modes must agree"""
+
+    _, mountpoint = _require_mount(cijoe)
+
+    for args in ["--backend fiemap", "--backend fiemap --file_lookup_map"]:
+        assert not lookup(cijoe, mountpoint, args)
+        assert not lookup(cijoe, f"{mountpoint}/", args)
+
+
+def test_empty_path(cijoe):
+    """An empty path names no entry, in either lookup mode"""
+
+    _require_mount(cijoe)
+
+    for args in ["--backend fiemap", "--backend fiemap --file_lookup_map"]:
+        assert lookup(cijoe, "", args) == errno.EINVAL
+
+
+def test_basepath_prefix(cijoe):
+    """A path that only shares a prefix with the mountpoint is not under it, in either mode"""
+
+    _, mountpoint = _require_mount(cijoe)
+
+    for args in ["--backend fiemap", "--backend fiemap --file_lookup_map"]:
+        assert lookup(cijoe, f"{mountpoint}X/{DEEP_FILE}", args) == errno.EINVAL
+
+
+def test_missing(cijoe):
+    """A path to an entry that does not exist is not found, the same way in both lookup modes"""
+
+    _, mountpoint = _require_mount(cijoe)
+
+    for args in ["--backend fiemap", "--backend fiemap --file_lookup_map"]:
+        assert lookup(cijoe, f"{mountpoint}/does-not-exist", args) == errno.ENOENT

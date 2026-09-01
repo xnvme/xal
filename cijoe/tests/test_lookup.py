@@ -1,3 +1,6 @@
+import errno
+import shlex
+
 DEEP_DIR = "/".join(
     f"deeply-nested-directory-with-a-descriptive-name-{cur}" for cur in range(1, 7)
 )
@@ -9,7 +12,7 @@ def lookup(cijoe, path: str, args: str = ""):
 
     dev_path = cijoe.getconf("xal.dev_path", None)
 
-    err, _ = cijoe.run(f"xal {args} --filename {path} {dev_path}")
+    err, _ = cijoe.run(f"xal {args} --filename {shlex.quote(path)} {dev_path}")
 
     return err
 
@@ -22,3 +25,21 @@ def test_deep_path_xfs(cijoe):
     """
 
     assert not lookup(cijoe, f"/{DEEP_FILE}", "--backend xfs")
+
+
+def test_root_xfs(cijoe):
+    """Resolve the root of the indexed tree, given as "/" on the XFS backend"""
+
+    assert not lookup(cijoe, "/", "--backend xfs")
+
+
+def test_empty_path_xfs(cijoe):
+    """An empty path names no entry"""
+
+    assert lookup(cijoe, "", "--backend xfs")
+
+
+def test_missing_xfs(cijoe):
+    """A path to an entry that does not exist is not found"""
+
+    assert lookup(cijoe, "/does-not-exist", "--backend xfs") == errno.ENOENT
