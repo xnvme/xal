@@ -928,34 +928,58 @@ compare_name_to_inode(const void *key, const void *elem)
 	return strcmp(component, inode->name);
 }
 
+/**
+ * Return what follows 'basepath' in 'path', either nothing or a '/', or NULL when 'path' is
+ * neither 'basepath' nor under it
+ */
+char *
+path_under_basepath(char *path, const char *basepath)
+{
+	size_t basepath_len = strlen(basepath);
+
+	if (strncmp(path, basepath, basepath_len) != 0) {
+		return NULL;
+	}
+
+	if (path[basepath_len] != '\0' && path[basepath_len] != '/') {
+		return NULL;
+	}
+
+	return path + basepath_len;
+}
+
 int
 search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode)
 {
 	struct xal_inode *search, *found = NULL;
-	char *search_begin, *search_end;
-	size_t basepath_len;
-
-	basepath_len = strlen(basepath);
+	char *search_begin, *search_end, *remainder;
 
 	if (!root) {
 		XAL_DEBUG("FAILED: no xal->root, call xal_index()");
 		return -EINVAL;
 	}
 
-	if (strlen(path) <= basepath_len + 1) {
-		XAL_DEBUG("FAILED: Not a valid path(%s); path too short; must be absolute path to entry in mountpoint(%s)",
+	if (!path[0]) {
+		XAL_DEBUG("FAILED: no path given");
+		return -EINVAL;
+	}
+
+	remainder = path_under_basepath(path, basepath);
+	if (!remainder) {
+		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; "
+			"must be absolute path to entry in mountpoint(%s)",
 			path, basepath);
 		return -EINVAL;
 	}
 
-	if (strncmp(path, basepath, basepath_len) != 0) {
-		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; must be absolute path to entry in mountpoint(%s)",
-			path, basepath);
-		return -EINVAL;
+	/* The indexed root itself; the basepath alone for FIEMAP, "/" for XFS */
+	if (!remainder[0] || strcmp(remainder, "/") == 0) {
+		*inode = root;
+		return 0;
 	}
 
 	search = root;
-	search_begin = path + basepath_len + 1;
+	search_begin = remainder + 1;
 	search_end = strchr(search_begin, '/');
 
 	while (!found) {
