@@ -839,25 +839,34 @@ xal_inode_path(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_n
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode)
 {
-	struct xal_inode *parent;
-	int wrtn = 0;
+	char buf[XAL_INODE_PATH_MAXLEN + 1];
+	size_t nbytes = 0;
+	int exp_seqlock, err;
 
-	if (!inode) {
-		return wrtn;
-	}
-	if (inode->parent_idx == XAL_POOL_IDX_NONE) {
-		return wrtn;
+	if (!xal || !inode) {
+		return 0;
 	}
 
-	parent = xal_inode_at(xal, inode->parent_idx);
-	if (!parent) {
-		return wrtn;
+	if (xal_is_dirty(xal)) {
+		return 0;
 	}
 
-	wrtn += xal_inode_path_pp(xal, parent);
-	wrtn += printf("/%.*s", inode->namelen, inode->name);
+	exp_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock & 1) {
+		return 0;
+	}
 
-	return wrtn;
+	buf[0] = '\0';
+	err = inode_path_assemble(xal, inode, buf, sizeof(buf), &nbytes);
+	if (err) {
+		return 0;
+	}
+
+	if (exp_seqlock != xal_get_seq_lock(xal)) {
+		return 0;
+	}
+
+	return printf("%s", buf);
 }
 
 bool
