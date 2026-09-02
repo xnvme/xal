@@ -30,11 +30,7 @@
 #define XAL_DEBUG_FCALL(fn, ...) do {} while (0)
 #endif
 
-#ifdef static_assert
-#define XAL_STATIC_ASSERT(cond, msg) static_assert(cond, msg);
-#else
-#define XAL_STATIC_ASSERT(cond, msg)
-#endif
+#define XAL_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 
 /**
  * Macro to suppress warnings on unused arguments, thanks to stackoverflow.

@@ -317,7 +317,7 @@ struct xal_odf_dinode {
 
 	/* structure must be padded to 64 bit alignment */
 };
-XAL_STATIC_ASSERT(sizeof(struct xal_odf_dinode) == 176, "Incorrect size")
+XAL_STATIC_ASSERT(sizeof(struct xal_odf_dinode) == 176, "Incorrect size");
 
 struct xal_odf_dir2_sf_hdr {
 	uint8_t count;	   /* Number of directory entries */
