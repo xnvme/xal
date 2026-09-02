@@ -41,10 +41,11 @@ def create_directory_with_urandom_content(
     for cmd in [
         f"mkdir -p {dir}",
         (
-            f'i=0; while [ "$i" -le ${count} ]; do '
+            f'i=0; while [ "$i" -lt {count} ]; do '
             f"dd if=/dev/urandom of={dir}/file-rand-{size}-$i-{count}.bin status=none "
             f"bs={size} count=1"
             "; i=$((i + 1)); done"
+            f'; [ "$i" -eq {count} ]'
         ),
     ]:
         err, state = cijoe.run(cmd)
@@ -167,9 +168,10 @@ def provoke_odf_file_fmt_btree(args: Namespace, cijoe: Cijoe) -> int:
         commands = [
             f"mkdir -p {prefix} && truncate -s 0 {filepath}",
             (
-                f'i=0; while [ "$i" -le ${nextents} ]; do '
+                f'i=0; while [ "$i" -lt {nextents} ]; do '
                 f"fallocate -o $((i * 8192)) -l 4096 {filepath}"
                 "; i=$((i + 1)); done"
+                f'; [ "$i" -eq {nextents} ]'
             ),
         ]
         for cmd in commands:
