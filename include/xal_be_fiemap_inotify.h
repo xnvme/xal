@@ -3,8 +3,8 @@
 
 #include <stdatomic.h>
 
-#define XAL_BE_FIEMAP_INOTIFY_RUNNING 1
-#define XAL_BE_FIEMAP_INOTIFY_JOINABLE 2
+#define XAL_BE_FIEMAP_INOTIFY_JOINABLE 1
+#define XAL_BE_FIEMAP_INOTIFY_EXITED 2
 
 struct xal_inotify {
 	enum xal_watchmode watch_mode;

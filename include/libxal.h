@@ -354,7 +354,9 @@ xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args);
  * 
  * Assumes that
  *  - you have run xal_open() with backend FIEMAP and a watch_mode other than XAL_WATCHMODE_NONE,
- *  - the background thread is running, see`xal_watch_filesystem()`.
+ *  - the background thread has been started, see `xal_watch_filesystem()`,
+ *  - the background thread has not previously been stopped and joined by `xal_close()` or 
+ *    `xal_stop_watching_filesystem()`.
  * 
  * If these assumptions do not hold, this will result in an error.
  * 
