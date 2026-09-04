@@ -321,7 +321,8 @@ xal_index(struct xal *xal);
  * dirty. Dirty means breaking filesystem changes (file creation, deletion, or rename) were
  * detected or marked via xal_mark_dirty(), and the in-memory representation is now stale.
  *
- * The callback is called from the watch thread; keep it short and thread-safe.
+ * The callback is called from the watch thread; keep it short and thread-safe. It must not call
+ * xal_watch_filesystem(), xal_stop_watching_filesystem() or xal_close().
  *
  * @param xal     The xal struct that became dirty.
  * @param cb_args The opaque pointer passed to xal_watch_filesystem().
@@ -338,6 +339,12 @@ typedef void (*xal_dirty_cb)(struct xal *xal, void *cb_args);
  *  - you have indexed the file system with xal_index().
  *
  * If these assumptions do not hold, this will result in an error.
+ *
+ * This call, xal_stop_watching_filesystem() and xal_close() all act on the same watch thread and
+ * must be serialised by the caller, including against themselves: two concurrent starts can each
+ * create a thread and leave one of them unjoinable, and two concurrent stops can join the same
+ * thread twice. None of them may be called from xal_dirty_cb, since that runs on the watch thread
+ * and would join itself.
  *
  * @param xal     The xal struct obtained when opened with xal_open().
  * @param cb      Optional callback invoked when xal becomes dirty. May be NULL.
@@ -359,6 +366,8 @@ xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args);
  *    `xal_stop_watching_filesystem()`.
  * 
  * If these assumptions do not hold, this will result in an error.
+ * 
+ * Requires the same external serialisation as xal_watch_filesystem().
  * 
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
