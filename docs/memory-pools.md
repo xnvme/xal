@@ -113,3 +113,16 @@ being told about whichever backend it happens under.
 A secondary that finds the view stale — attaching returns ``-ESTALE`` when the
 region has been marked dirty — must wait for the primary to re-index rather
 than re-index itself.
+
+The state region begins with a magic and a version, and ``xal_from_shm()``
+checks both, along with the size of the region. ``-EPROTO`` says the primary
+published from a build this one cannot read; unlike ``-ESTALE``, ``-EAGAIN``
+and ``-ENOENT``, it never resolves by waiting. The version covers what the
+pools mean, not only how they are laid out, so a change to the interpretation
+of a field requires a bump even though every size and offset is unchanged;
+``xal_inode.name`` holding a leaf name rather than an assembled path is one.
+``-EAGAIN`` marks the two windows where a primary has created the region but
+not finished publishing it: the magic is stored last, after the region is
+sized and every other field is written. A primary that died inside one of
+those windows leaves a region that answers ``-EAGAIN`` for good, and the name
+has to be unlinked before another primary can take it.
