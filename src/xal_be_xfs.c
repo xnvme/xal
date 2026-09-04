@@ -1317,6 +1317,7 @@ process_dinode_dir_local(struct xal *xal, struct xal_odf_dinode *dinode, struct 
 		cursor += 1 + 2; ///< Advance past 'namelen' and 'offset[2]'
 
 		memcpy(dentry->name, cursor, dentry->namelen);
+		dentry->name[dentry->namelen] = '\0';
 		cursor += dentry->namelen; ///< Advance past 'name'
 
 		dentry->ftype = *cursor;
@@ -1426,6 +1427,7 @@ decode_dentry(void *buf, struct xal_inode *dentry)
 	cursor += 1;
 
 	memcpy(dentry->name, cursor, dentry->namelen);
+	dentry->name[dentry->namelen] = '\0';
 	cursor += dentry->namelen;
 
 	dentry->ftype = *cursor;
@@ -1768,6 +1770,7 @@ xal_be_xfs_index(struct xal *xal)
 	root->ino = xal->sb.rootino;
 	root->ftype = XAL_ODF_DIR3_FT_DIR;
 	root->namelen = 0;
+	root->name[0] = '\0';
 	root->parent_idx = XAL_POOL_IDX_NONE;
 	root->content.extents.count = 0;
 	root->content.dentries.count = 0;

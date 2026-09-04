@@ -221,7 +221,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 	struct xal_inode *dir_inode, *inode;
 	kh_wd_to_inode_t *inode_map;
 	char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
-	char path[XAL_PATH_MAXLEN];
+	char path[XAL_INODE_PATH_MAXLEN + 1];
 	khiter_t iter;
 	ssize_t len, i;
 	struct stat st;
@@ -237,6 +237,8 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 		while (i < len) {
 			struct inotify_event *event = (struct inotify_event *)&buf[i];
 			__attribute__((unused)) char mask_pp[128];
+			size_t namelen;
+			int dirlen;
 
 			inode = NULL;  // reset the pointer to the inode
 			wd = event->wd;
@@ -271,15 +273,20 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 					return XAL_INOTIFY_REINDEX;
 				}
 
-				if (dir_inode->namelen + 1 + strlen(event->name) + 1 > sizeof(path)) {
-					XAL_DEBUG("FAILED: event(%s) full path too long(%zu)",
-							event->name, dir_inode->namelen + 1 + strlen(event->name) + 1);
+				dirlen = xal_inode_path(xal, dir_inode, path, sizeof(path));
+				if (dirlen < 0) {
+					XAL_DEBUG("FAILED: xal_inode_path(); err(%d)", dirlen);
 					return XAL_INOTIFY_REINDEX;
 				}
-				memcpy(path, dir_inode->name, dir_inode->namelen);
-				path[dir_inode->namelen] = '/';
-				memcpy(path + dir_inode->namelen + 1, event->name, strlen(event->name));
-				path[dir_inode->namelen + 1 + strlen(event->name)] = '\0';
+
+				namelen = strlen(event->name);
+				if ((size_t)dirlen + 1 + namelen + 1 > sizeof(path)) {
+					XAL_DEBUG("FAILED: event(%s) full path too long(%zu)",
+						  event->name, (size_t)dirlen + 1 + namelen + 1);
+					return XAL_INOTIFY_REINDEX;
+				}
+				path[dirlen] = '/';
+				memcpy(path + dirlen + 1, event->name, namelen + 1);
 
 				XAL_DEBUG("INFO: got full path of event: %s", path);
 				atomic_fetch_add(xal->seq_lock, 1);
@@ -287,7 +294,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
 					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
 
-					if (strcmp(child->name, path) == 0) {
+					if (strcmp(child->name, event->name) == 0) {
 						inode = child;
 						break;
 					}

@@ -36,6 +36,7 @@
 
 #define XAL_INODE_NAME_MAXLEN 255
 #define XAL_PATH_MAXLEN 255
+#define XAL_INODE_PATH_MAXLEN 4096
 #define XAL_POOL_IDX_NONE UINT32_MAX
 
 enum xal_backend {
@@ -112,7 +113,7 @@ struct xal_inode {
 	union xal_inode_content content;
 	uint8_t ftype;			      ///< File-type (directory, filename, symlink etc.)
 	uint8_t namelen;		      ///< Length of the name; not counting nul-termination
-	char name[XAL_INODE_NAME_MAXLEN + 1]; ///< Name; not including nul-termination
+	char name[XAL_INODE_NAME_MAXLEN + 1]; ///< Leaf name of the entry, nul-terminated; not a path, see xal_inode_path()
 	uint8_t reserved[22];
 	uint32_t parent_idx;
 };
@@ -372,9 +373,10 @@ xal_stop_watching_filesystem(struct xal *xal);
  *   * Directory
  *   * Regular file
  *
- * The index is checked before the traversal starts: -ESTALE is returned when it has been marked
- * dirty, which for a handle from xal_from_shm() includes the primary having closed. The check is
- * not repeated during the walk, and xal_get_root() and xal_inode_at() do not perform it at all.
+ * The index is checked before the traversal starts and again at every level of it: -ESTALE is
+ * returned when it has been marked dirty, which for a handle from xal_from_shm() includes the
+ * primary having closed, and when it is rebuilt while the walk is running. xal_get_root() and
+ * xal_inode_at() perform neither check.
  *
  * Returns 0 on success. On error, negative errno is returned to indicate the error.
  */
@@ -398,6 +400,11 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno);
  * will always result in it using the XAL_FILE_LOOKUPMODE_TRAVERSE. To get constant time lookups
  * with the XAL_FILE_LOOKUPMODE_HASHMAP mode, call xal_build_lookup_hashmap() before.
  *
+ * The state region carries a magic and a version, checked here along with its size; the version
+ * covers the pool regions too. -EPROTO means the primary published from a build this one cannot
+ * read, which no amount of waiting fixes; -EAGAIN means the primary has not finished publishing
+ * yet.
+ *
  * @param shm_name	   Base name for the shared memory regions (same value as opts->shm_name)
  * @param out          Output pointer for the constructed xal
  *
@@ -406,8 +413,45 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno);
 int
 xal_from_shm(const char *shm_name, struct xal **out);
 
+/**
+ * Print the path of the given inode to stdout
+ *
+ * The path is printed relative to the root of the indexed tree, that is, without the basepath
+ * that xal_inode_path() prefixes for the FIEMAP backend, and nothing is printed for the root
+ * itself. That is what lets a caller prefix a root of its own; 'xal --find' prints the device
+ * URI. Use xal_inode_path() for a path accepted by xal_get_inode().
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ * @param inode The inode to print the path of
+ *
+ * @return The number of characters printed. Nothing is printed when the index is stale. A
+ * malformed parent chain stops the walk at the bad link, so what is printed is missing the
+ * components above it.
+ */
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode);
+
+/**
+ * Assemble the absolute path of the given inode into the given buffer.
+ *
+ * 'struct xal_inode' stores the leaf name of the entry; the path is assembled by walking the
+ * parent chain to the root of the indexed tree. The assembled path is the one accepted by
+ * xal_get_inode(): for the FIEMAP backend it is prefixed with the indexed root on the local
+ * filesystem (the mountpoint, or opts.subtree when given), for the XFS backend it is given as
+ * if the filesystem was mounted at root ("/").
+ *
+ * @param xal The xal struct obtained when opened with xal_open()
+ * @param inode The inode to assemble the path of
+ * @param buf Buffer receiving the nul-terminated path; XAL_INODE_PATH_MAXLEN + 1 bytes holds any
+ * path the FIEMAP backend can index, that being a path on a mounted filesystem. The XFS backend
+ * indexes trees of any depth, so a path there can be longer, and -ENAMETOOLONG is returned
+ * @param buf_nbytes Size of 'buf' in bytes, including room for nul-termination
+ *
+ * @return On success, the length of the path written, not counting nul-termination, is returned.
+ * On error, negative errno is returned to indicate the error.
+ */
+int
+xal_inode_path(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_nbytes);
 
 /**
  * Determine if the given inode is a directory
@@ -435,6 +479,9 @@ xal_inode_is_file(struct xal_inode *inode);
  * If xal is opened with XAL_FILE_LOOKUPMODE_HASHMAP, this will be a constant
  * time lookup. Else, it will search through the tree at xal->root to find the
  * inode.
+ *
+ * In hashmap mode a lookup racing xal_index() in another thread of the same process can compare
+ * against a key that the re-index has already freed. Serialising the two avoids it.
  * 
  * @param xal The xal struct obtained when opened with xal_open()
  * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
