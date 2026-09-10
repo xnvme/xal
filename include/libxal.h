@@ -398,6 +398,11 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno);
  * will always result in it using the XAL_FILE_LOOKUPMODE_TRAVERSE. To get constant time lookups
  * with the XAL_FILE_LOOKUPMODE_HASHMAP mode, call xal_build_lookup_hashmap() before.
  *
+ * The state region carries a magic and a version, checked here along with its size; the version
+ * covers the pool regions too. -EPROTO means the primary published from a build this one cannot
+ * read, which no amount of waiting fixes; -EAGAIN means the primary has not finished publishing
+ * yet.
+ *
  * @param shm_name	   Base name for the shared memory regions (same value as opts->shm_name)
  * @param out          Output pointer for the constructed xal
  *

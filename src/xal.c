@@ -194,6 +194,7 @@ publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoi
 	 * clears it once there is something to attach to. */
 	atomic_store(&state->index_state, XAL_STATE_DIRTY);
 
+	state->version = XAL_SHM_VERSION;
 	state->type = be;
 	state->sb = xal->sb;
 	strncpy(state->mountpoint, mountpoint, XAL_PATH_MAXLEN - 1);
@@ -207,6 +208,8 @@ publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoi
 			state->subtree[XAL_PATH_MAXLEN - 1] = '\0';
 		}
 	}
+
+	atomic_store_explicit(&state->magic, XAL_SHM_MAGIC, memory_order_release);
 
 	return 0;
 }
@@ -503,6 +506,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	char shm_name_inodes[128], shm_name_extents[128], shm_name_state[128];
 	size_t inodes_size, extents_size;
 	void *inodes_mem, *extents_mem;
+	uint64_t magic;
 	int shm_fd = -1, err;
 
 	xal = calloc(1, sizeof(*xal));
@@ -524,6 +528,25 @@ xal_from_shm(const char *shm_name, struct xal **out)
 		goto failed;
 	}
 
+	err = fstat(shm_fd, &st);
+	if (err) {
+		err = -errno;
+		fprintf(stderr, "Failed: fstat(state); err(%d)\n", err);
+		goto failed;
+	}
+
+	if (!st.st_size) {
+		XAL_DEBUG("FAILED: state region is empty, primary is still publishing it");
+		err = -EAGAIN;
+		goto failed;
+	}
+	if (st.st_size != (off_t)sizeof(struct xal_shared_state)) {
+		fprintf(stderr, "Failed: state region is %jd bytes, expected %zu\n",
+			(intmax_t)st.st_size, sizeof(struct xal_shared_state));
+		err = -EPROTO;
+		goto failed;
+	}
+
 	state = mmap(NULL, sizeof(struct xal_shared_state), PROT_READ | PROT_WRITE, MAP_SHARED,
 		     shm_fd, 0);
 	close(shm_fd);
@@ -533,6 +556,21 @@ xal_from_shm(const char *shm_name, struct xal **out)
 		err = -errno;
 		fprintf(stderr, "Failed: mmap(state); err(%d)\n", err);
 		goto failed;
+	}
+
+	magic = atomic_load_explicit(&state->magic, memory_order_acquire);
+	if (!magic) {
+		XAL_DEBUG("FAILED: state region has no magic, primary is still publishing it");
+		err = -EAGAIN;
+		goto unmap_state;
+	}
+	if ((magic != XAL_SHM_MAGIC) || (state->version != XAL_SHM_VERSION)) {
+		fprintf(stderr, "Failed: state magic(%llx) version(%u), expected magic(%llx) "
+				"version(%u)\n",
+			(unsigned long long)magic, state->version,
+			(unsigned long long)XAL_SHM_MAGIC, XAL_SHM_VERSION);
+		err = -EPROTO;
+		goto unmap_state;
 	}
 
 	xal->state = state;
