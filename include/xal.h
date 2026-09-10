@@ -31,7 +31,19 @@ enum xal_state {
 	XAL_STATE_INDEXING = 2, ///< xal_index() is rebuilding the representation
 };
 
+#define XAL_SHM_MAGIC 0x58414c5341ULL ///< "XALSA", XAL Shared ABI; zero until published
+
+/**
+ * Bumped whenever a secondary built at one version would misread a region published at another.
+ * That covers the layout of this struct and of the pool elements, and equally what the pool
+ * contents mean: changing xal_inode.name from an assembled path to a leaf name leaves every size
+ * and offset intact and still requires a bump.
+ */
+#define XAL_SHM_VERSION 1
+
 struct xal_shared_state {
+	_Atomic uint64_t magic; ///< XAL_SHM_MAGIC, stored last, so zero means not yet published
+	uint32_t version; ///< XAL_SHM_VERSION
 	enum xal_backend type;
 	struct xal_sb sb;
 	char mountpoint[XAL_PATH_MAXLEN];
@@ -39,6 +51,8 @@ struct xal_shared_state {
 	atomic_int index_state; ///< One of enum xal_state
 	atomic_int seq_lock; ///< Even when stable; odd while the pools are being rewritten in place
 };
+XAL_STATIC_ASSERT(offsetof(struct xal_shared_state, magic) == 0, "shm ABI");
+XAL_STATIC_ASSERT(offsetof(struct xal_shared_state, version) == 8, "shm ABI");
 
 /**
  * XAL

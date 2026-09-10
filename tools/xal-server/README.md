@@ -99,14 +99,17 @@ xal_close(xal); // unmaps; does not unlink, the server owns the regions
 name, it attaches as a secondary instead of opening the device. `xal_get_procrole()` reports which
 of the two happened.
 
-Two errors from an attach mean "not yet", not failure, and a reader starting alongside the server
+Three errors from an attach mean "not yet", not failure, and a reader starting alongside the server
 should retry on them:
 
 | Error | Meaning |
-|-------|---------|
+| ----- | ------- |
 | `-EAGAIN` | the region exists but the server is still setting it up |
 | `-ESTALE` | the region is set up, but the first `xal_index()` has not finished |
 | `-ENOENT` | no index is published under that name |
+
+`-EPROTO` is the opposite: the server published a state region this reader cannot read, because the
+two were built against different xal versions. Retrying never clears it; rebuild both sides.
 
 ## Staying current
 
