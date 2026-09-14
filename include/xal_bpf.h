@@ -3,6 +3,8 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
+#include <xal_bpf_events.h>
 
 struct xal_bpf {
 	struct xal_bpf_ctx ctx;
