@@ -27,7 +27,9 @@
 
 #else
 #define XAL_DEBUG(...)
-#define XAL_DEBUG_FCALL(fn, ...) do {} while (0)
+#define XAL_DEBUG_FCALL(fn, ...)                                                                   \
+	do {                                                                                       \
+	} while (0)
 #endif
 
 #define XAL_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)

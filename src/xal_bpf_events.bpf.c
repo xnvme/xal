@@ -1,6 +1,6 @@
 #include "vmlinux.h"
-#include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <xal_bpf_events.h>
 
@@ -29,8 +29,7 @@ dev_minor_from_dev(uint32_t dev)
 static __always_inline bool
 match_fs(uint32_t dev)
 {
-	if (ctx.dev_major != dev_major_from_dev(dev) ||
-		ctx.dev_minor != dev_minor_from_dev(dev)) {
+	if (ctx.dev_major != dev_major_from_dev(dev) || ctx.dev_minor != dev_minor_from_dev(dev)) {
 		__sync_fetch_and_add(&stats.ignored_events, 1);
 		return false;
 	}
@@ -39,9 +38,8 @@ match_fs(uint32_t dev)
 }
 
 static __always_inline void
-fill_event(struct xal_bpf_event *e, enum xal_event_type type, uint64_t ino,
-	   uint64_t startoff, uint64_t startblock, uint64_t blockcount,
-	   uint32_t state, uint32_t bmap_state)
+fill_event(struct xal_bpf_event *e, enum xal_event_type type, uint64_t ino, uint64_t startoff,
+	   uint64_t startblock, uint64_t blockcount, uint32_t state, uint32_t bmap_state)
 {
 	uint64_t id = bpf_get_current_pid_tgid();
 
@@ -65,7 +63,8 @@ fill_event(struct xal_bpf_event *e, enum xal_event_type type, uint64_t ino,
 }
 
 SEC("kprobe/thaw_super")
-int BPF_KPROBE(on_thaw_super, struct super_block *sb)
+int
+BPF_KPROBE(on_thaw_super, struct super_block *sb)
 {
 	dev_t dev;
 	struct xal_bpf_event *e;

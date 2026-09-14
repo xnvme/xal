@@ -39,20 +39,33 @@
 #define XAL_POOL_IDX_NONE UINT32_MAX
 
 enum xal_backend {
-	XAL_BACKEND_XFS     = 1,
-	XAL_BACKEND_FIEMAP  = 2,
+	XAL_BACKEND_XFS = 1,
+	XAL_BACKEND_FIEMAP = 2,
 };
 
 enum xal_watchmode {
-	XAL_WATCHMODE_NONE             = 0,  ///< There will be no notifications of changes to the filesystem.
-	XAL_WATCHMODE_DIRTY_DETECTION  = 1,  ///< When changes to the file system occurs, the xal struct will become "dirty" indicating that the representation of the file system is stale.
-	XAL_WATCHMODE_EXTENT_UPDATE    = 2,  ///< When other changes to the file system occurs, the xal struct will be automatically updated if the extent information is the only subject to change, otherwise the xal struct will become "dirty" indicating that the representation of the file system is stale.
-	XAL_WATCHMODE_REFLINK_SNAPSHOT = 3,  ///< At xal_index() time, reflink every regular file (optionally restricted to opts.subtree) into a private snapshot and capture extents from the clones. The clones pin their blocks for the xal session, so the extents returned by xal_get_extents() stay valid under concurrent writes. No inotify watch or filesystem freeze is used; clones are removed at xal_close().
+	XAL_WATCHMODE_NONE = 0, ///< There will be no notifications of changes to the filesystem.
+	XAL_WATCHMODE_DIRTY_DETECTION =
+	    1, ///< When changes to the file system occurs, the xal struct will become "dirty"
+	       ///< indicating that the representation of the file system is stale.
+	XAL_WATCHMODE_EXTENT_UPDATE =
+	    2, ///< When other changes to the file system occurs, the xal struct will be
+	       ///< automatically updated if the extent information is the only subject to change,
+	       ///< otherwise the xal struct will become "dirty" indicating that the representation
+	       ///< of the file system is stale.
+	XAL_WATCHMODE_REFLINK_SNAPSHOT =
+	    3, ///< At xal_index() time, reflink every regular file (optionally restricted to
+	       ///< opts.subtree) into a private snapshot and capture extents from the clones. The
+	       ///< clones pin their blocks for the xal session, so the extents returned by
+	       ///< xal_get_extents() stay valid under concurrent writes. No inotify watch or
+	       ///< filesystem freeze is used; clones are removed at xal_close().
 };
 
 enum xal_file_lookupmode {
-	XAL_FILE_LOOKUPMODE_TRAVERSE = 0,  ///< Traverses the file tree from xal->root using binary search at each level to find the inode.
-	XAL_FILE_LOOKUPMODE_HASHMAP = 1,   ///< Uses a hash map for constant-time inode lookup in xal_get_inode(), with higher memory usage.
+	XAL_FILE_LOOKUPMODE_TRAVERSE = 0, ///< Traverses the file tree from xal->root using binary
+					  ///< search at each level to find the inode.
+	XAL_FILE_LOOKUPMODE_HASHMAP = 1,  ///< Uses a hash map for constant-time inode lookup in
+					  ///< xal_get_inode(), with higher memory usage.
 };
 
 struct xal_opts {
@@ -60,8 +73,13 @@ struct xal_opts {
 	enum xal_watchmode watch_mode;
 	enum xal_file_lookupmode file_lookupmode;
 	const char *mountpoint;
-	const char *shm_name; ///< If set, pool memory is backed by POSIX shared memory with this base name, see @xal_from_pools() for sharing the pools across processes
-	const char *subtree; ///< FIEMAP backend only: absolute path at or under the mountpoint to scope the index to. Only files under it are indexed (and, in XAL_WATCHMODE_REFLINK_SNAPSHOT, reflinked). NULL/empty indexes the whole mount. Ignored by the XFS backend.
+	const char
+	    *shm_name; ///< If set, pool memory is backed by POSIX shared memory with this base
+		       ///< name, see @xal_from_pools() for sharing the pools across processes
+	const char *subtree; ///< FIEMAP backend only: absolute path at or under the mountpoint to
+			     ///< scope the index to. Only files under it are indexed (and, in
+			     ///< XAL_WATCHMODE_REFLINK_SNAPSHOT, reflinked). NULL/empty indexes the
+			     ///< whole mount. Ignored by the XFS backend.
 };
 
 struct xal_extent {
@@ -93,12 +111,12 @@ struct xal_inode;
 
 struct xal_dentries {
 	uint32_t inodes_idx; ///< Index of first child in xal->inodes pool
-	uint32_t count;      ///< Number of children; for directories
+	uint32_t count;	     ///< Number of children; for directories
 };
 
 struct xal_extents {
 	uint32_t extent_idx; ///< Index of first extent in xal->extents pool
-	uint32_t count;      ///< Number of extents
+	uint32_t count;	     ///< Number of extents
 };
 
 union xal_inode_content {
@@ -166,7 +184,8 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode);
  * @return On success a 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
-xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
+xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent,
+		    struct xal_extent_converted *output);
 
 /**
  * Returns the extent information in blocks using the LBA format on the block device.
@@ -178,13 +197,14 @@ xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal
  * @return On success a 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
-xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
+xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent,
+		  struct xal_extent_converted *output);
 
 /**
  * Returns the root of the file-system
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * 
+ *
  * @return On success, the inode at the root of the file-system is retuned
  */
 struct xal_inode *
@@ -193,11 +213,11 @@ xal_get_root(struct xal *xal);
 /**
  * Returns true if breaking changes to the mounted file-system have been found, which
  * invalidates the representation of the file-system in the xal->root field.
- * 
+ *
  * @note If the xal struct was not opened with backend "fiemap", change detection is not supported.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * 
+ *
  * @return a boolean value, indicating whether breaking changes to the file-system have
  *         been found.
  */
@@ -222,12 +242,12 @@ xal_mark_dirty(struct xal *xal);
 
 /**
  * Returns the current value of the sequence lock.
- * 
+ *
  * An uneven number indicates the struct is being modified and is not safe to read. An even number
  * indicates that the struct is safe to read.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * 
+ *
  * @return the current value of the sequence lock
  */
 int
@@ -304,11 +324,11 @@ xal_dinodes_retrieve(struct xal *xal);
 /**
  * Produce an index of the directory and files stored on the device
  *
- * Assumes that you have retrieved all the inodes from disk via xal_dinodes_retrieve() if opened with
- * backend XAL_BACKEND_XFS.
- * 
+ * Assumes that you have retrieved all the inodes from disk via xal_dinodes_retrieve() if opened
+ * with backend XAL_BACKEND_XFS.
+ *
  * When called, any index created from previous calls to xal_index() are cleared.
- * 
+ *
  * This function will fail if given a xal handle obtained from xal_from_shm().
  *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
@@ -351,13 +371,13 @@ xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args);
 /**
  * Stop the background thread listening to inotify events of changes to the file system on the
  * block device.
- * 
+ *
  * Assumes that
  *  - you have run xal_open() with backend FIEMAP and a watch_mode other than XAL_WATCHMODE_NONE,
  *  - the background thread is running, see`xal_watch_filesystem()`.
- * 
+ *
  * If these assumptions do not hold, this will result in an error.
- * 
+ *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
@@ -431,14 +451,14 @@ xal_inode_is_file(struct xal_inode *inode);
 
 /**
  * Retrieve the inode that represent the file or directory at the given path.
- * 
+ *
  * If xal is opened with XAL_FILE_LOOKUPMODE_HASHMAP, this will be a constant
  * time lookup. Else, it will search through the tree at xal->root to find the
  * inode.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
-			   be given as if it was mounted at root ("/").
+ * @param path Absolute path to the file or directory. If opened with the XFS backend, the path
+ should be given as if it was mounted at root ("/").
  * @param inode Pointer for the found inode
  *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
@@ -449,7 +469,7 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode);
 /**
  * Build a path-to-inode hash map from the in-memory inode tree.
  *
- * Intended for use after xal_open() without opts->file_lookupmode not set to 
+ * Intended for use after xal_open() without opts->file_lookupmode not set to
  * XAL_FILE_LOOKUPMODE_HASHMAP, or after xal_from_pools(), where xal_index() is not
  * called but the caller wants constant-time inode lookup via xal_get_inode(). Walks
  * the existing tree and populates the hash map locally. Any previously existing
@@ -466,15 +486,15 @@ xal_build_lookup_hashmap(struct xal *xal);
 
 /**
  * Retrieve the extents for the file at the given path.
- * 
+ *
  * This will search through the tree at xal->root to find the inode. This call fails if the entry
  * at the given path is not a file.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
-			   be given as if it was mounted at root ("/").
+ * @param path Absolute path to the file or directory. If opened with the XFS backend, the path
+ should be given as if it was mounted at root ("/").
  * @param extents Pointer for the found xal_extents
- * 
+ *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
@@ -482,15 +502,15 @@ xal_get_extents(struct xal *xal, char *path, struct xal_extents **extents);
 
 /**
  * Retrieve the directory entries for the directory at the given path.
- * 
+ *
  * This will search through the tree at xal->root to find the inode. This call fails if the entry
  * at the given path is not a directory.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
-			   be given as if it was mounted at root ("/").
+ * @param path Absolute path to the file or directory. If opened with the XFS backend, the path
+ should be given as if it was mounted at root ("/").
  * @param dentries Pointer for the found xal_dentries
- * 
+ *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int

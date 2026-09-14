@@ -19,10 +19,10 @@
 
 #include <xal.h>
 #include <xal_be_fiemap.h>
-#include <xal_odf.h>
-#include <xal_bpf_events.h>
 #include <xal_bpf.h>
+#include <xal_bpf_events.h>
 #include <xal_bpf_events.skel.h>
+#include <xal_odf.h>
 
 static int
 handle_event(void *__ctx, void *__data, size_t len)
@@ -31,14 +31,16 @@ handle_event(void *__ctx, void *__data, size_t len)
 	struct xal *xal = __ctx;
 
 	if (len < sizeof(*e)) {
-		XAL_DEBUG("FAILED: size of event too small; len(%lu) sizeof(e)(%lu)", len, sizeof(*e));
+		XAL_DEBUG("FAILED: size of event too small; len(%lu) sizeof(e)(%lu)", len,
+			  sizeof(*e));
 		return -EINVAL;
 	}
 
 	switch (e->type) {
 	case XAL_FS_UNFREEZE_EVENT:
-		XAL_DEBUG("WARNING: time(%ld) tgid/pid(%d/%d) cpu(%d) thawed the filesystem dev(%d,%d); unsafe to use extents",
-			e->ts_ns, e->tgid, e->pid, e->cpu, e->dev_major, e->dev_minor);
+		XAL_DEBUG("WARNING: time(%ld) tgid/pid(%d/%d) cpu(%d) thawed the filesystem "
+			  "dev(%d,%d); unsafe to use extents",
+			  e->ts_ns, e->tgid, e->pid, e->cpu, e->dev_major, e->dev_minor);
 		if (xal && xal->index_state) {
 			xal_mark_dirty(xal);
 			XAL_DEBUG("WARNING: marking xal as dirty");
@@ -173,10 +175,12 @@ background_bpf_poll(void *arg)
 		}
 
 		err = 0;
-		uint64_t current_lost = __atomic_load_n(&bpf->skel->bss->stats.lost_events, __ATOMIC_RELAXED);
+		uint64_t current_lost =
+		    __atomic_load_n(&bpf->skel->bss->stats.lost_events, __ATOMIC_RELAXED);
 		if (current_lost > last_lost_events) {
-			XAL_DEBUG("WARNING: missed %lu BPF events! Marking cache as dirty for safety.",
-				  current_lost - last_lost_events);
+			XAL_DEBUG(
+			    "WARNING: missed %lu BPF events! Marking cache as dirty for safety.",
+			    current_lost - last_lost_events);
 			if (xal && xal->index_state) {
 				xal_mark_dirty(xal);
 			}

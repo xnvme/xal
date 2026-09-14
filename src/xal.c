@@ -34,20 +34,20 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno)
 	struct xal_backend_base *be = (struct xal_backend_base *)&xal->be;
 
 	switch (be->type) {
-		case XAL_BACKEND_FIEMAP:
-			return fsbno * xal->sb.blocksize;
+	case XAL_BACKEND_FIEMAP:
+		return fsbno * xal->sb.blocksize;
 
-		case XAL_BACKEND_XFS:
-			uint64_t ag, bno;
+	case XAL_BACKEND_XFS:
+		uint64_t ag, bno;
 
-			ag = fsbno >> xal->sb.agblklog;
-			bno = fsbno & ((1 << xal->sb.agblklog) - 1);
+		ag = fsbno >> xal->sb.agblklog;
+		bno = fsbno & ((1 << xal->sb.agblklog) - 1);
 
-			return (ag * xal->sb.agblocks + bno) * xal->sb.blocksize;
+		return (ag * xal->sb.agblocks + bno) * xal->sb.blocksize;
 
-		default:
-			XAL_DEBUG("FAILED: Unknown backend type(%d)", be->type);
-			return -EINVAL;
+	default:
+		XAL_DEBUG("FAILED: Unknown backend type(%d)", be->type);
+		return -EINVAL;
 	}
 }
 
@@ -302,49 +302,53 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 		if (!strlen(mountpoint)) {
 			err = retrieve_mountpoint(ident->uri, mountpoint);
 			if (err) {
-				XAL_DEBUG("INFO: Failed retrieve_mountpoint(), this is OK, setting backend to XFS");
+				XAL_DEBUG("INFO: Failed retrieve_mountpoint(), this is OK, setting "
+					  "backend to XFS");
 				opts->be = XAL_BACKEND_XFS;
 				err = 0;
 			} else {
-				XAL_DEBUG("INFO: dev(%s) mounted at path(%s), setting backend to FIEMAP", ident->uri, mountpoint);
+				XAL_DEBUG(
+				    "INFO: dev(%s) mounted at path(%s), setting backend to FIEMAP",
+				    ident->uri, mountpoint);
 				opts->be = XAL_BACKEND_FIEMAP;
 			}
 		} else {
-			XAL_DEBUG("INFO: given mountpoint at path(%s), setting backend to FIEMAP", mountpoint);
+			XAL_DEBUG("INFO: given mountpoint at path(%s), setting backend to FIEMAP",
+				  mountpoint);
 			opts->be = XAL_BACKEND_FIEMAP;
 		}
 	}
 
 	switch (opts->be) {
-		case XAL_BACKEND_XFS:
-			err = xal_be_xfs_open(dev, xal, opts);
+	case XAL_BACKEND_XFS:
+		err = xal_be_xfs_open(dev, xal, opts);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_xfs_open(); err(%d)", err);
+			return err;
+		}
+
+		break;
+
+	case XAL_BACKEND_FIEMAP:
+		if (strlen(mountpoint) == 0) {
+			err = retrieve_mountpoint(ident->uri, mountpoint);
 			if (err) {
-				XAL_DEBUG("FAILED: xal_be_xfs_open(); err(%d)", err);
+				XAL_DEBUG("FAILED: retrieve_mountpoint(); err(%d)", err);
 				return err;
 			}
+		}
 
-			break;
+		err = xal_be_fiemap_open(xal, mountpoint, opts);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_open(); err(%d)", err);
+			return err;
+		}
 
-		case XAL_BACKEND_FIEMAP:
-			if (strlen(mountpoint) == 0) {
-				err = retrieve_mountpoint(ident->uri, mountpoint);
-				if (err) {
-					XAL_DEBUG("FAILED: retrieve_mountpoint(); err(%d)", err);
-					return err;
-				}
-			}
+		break;
 
-			err = xal_be_fiemap_open(xal, mountpoint, opts);
-			if (err) {
-				XAL_DEBUG("FAILED: xal_be_fiemap_open(); err(%d)", err);
-				return err;
-			}
-
-			break;
-
-		default:
-			XAL_DEBUG("FAILED: Unexpected backend(%d)", opts->be);
-			return -EINVAL;
+	default:
+		XAL_DEBUG("FAILED: Unexpected backend(%d)", opts->be);
+		return -EINVAL;
 	}
 
 	(*xal)->dev = dev;
@@ -680,7 +684,8 @@ xal_inode_is_file(struct xal_inode *inode)
 }
 
 int
-xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output)
+xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent,
+		    struct xal_extent_converted *output)
 {
 	if (!extent) {
 		XAL_DEBUG("FAILED: no extent given");
@@ -696,7 +701,8 @@ xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal
 }
 
 int
-xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output)
+xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent,
+		  struct xal_extent_converted *output)
 {
 	uint32_t lba_blksze = xal->sb.lba_blksze;
 
@@ -735,7 +741,8 @@ compare_name_to_inode(const void *key, const void *elem)
 }
 
 int
-search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode)
+search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath,
+		    struct xal_inode **inode)
 {
 	struct xal_inode *search, *found = NULL;
 	char *search_begin, *search_end;
@@ -749,14 +756,16 @@ search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *b
 	}
 
 	if (strlen(path) <= basepath_len + 1) {
-		XAL_DEBUG("FAILED: Not a valid path(%s); path too short; must be absolute path to entry in mountpoint(%s)",
-			path, basepath);
+		XAL_DEBUG("FAILED: Not a valid path(%s); path too short; must be absolute path to "
+			  "entry in mountpoint(%s)",
+			  path, basepath);
 		return -EINVAL;
 	}
 
 	if (strncmp(path, basepath, basepath_len) != 0) {
-		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; must be absolute path to entry in mountpoint(%s)",
-			path, basepath);
+		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; must be absolute path to "
+			  "entry in mountpoint(%s)",
+			  path, basepath);
 		return -EINVAL;
 	}
 
@@ -766,7 +775,8 @@ search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *b
 
 	while (!found) {
 		struct xal_inode *child;
-		size_t search_len = search_end ? (size_t)(search_end - search_begin) : strlen(search_begin);
+		size_t search_len =
+		    search_end ? (size_t)(search_end - search_begin) : strlen(search_begin);
 		char component[search_len + 1];
 
 		memcpy(component, search_begin, search_len);
@@ -775,7 +785,8 @@ search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *b
 		XAL_DEBUG("Searching for component(%s)", component);
 
 		child = bsearch(component, xal_inode_at(xal, search->content.dentries.inodes_idx),
-				search->content.dentries.count, sizeof(struct xal_inode), compare_name_to_inode);
+				search->content.dentries.count, sizeof(struct xal_inode),
+				compare_name_to_inode);
 
 		if (!child) {
 			XAL_DEBUG("Component(%s) not found", component);

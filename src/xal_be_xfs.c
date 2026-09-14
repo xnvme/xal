@@ -591,7 +591,8 @@ dinodes_get(struct xal *xal, uint64_t ino, void **dinode)
  * Retrieve and decode the allocation group headers for a given allocation group
  *
  * This will retrieve the block containing the superblock and allocation-group headers. A subset of
- * the allocation group headers is decoded and xal->be->ags[seqo] is populated with the decoded data.
+ * the allocation group headers is decoded and xal->be->ags[seqo] is populated with the decoded
+ * data.
  *
  * Assumes the following:
  *
@@ -757,7 +758,7 @@ xal_be_xfs_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 		shm = shm_name;
 	}
 	err = xal_pool_map(&cand->inodes, 40000000UL, cand->sb.nallocated, sizeof(struct xal_inode),
-	                   shm);
+			   shm);
 	if (err) {
 		XAL_DEBUG("FAILED: xal_pool_map(inodes); err(%d)", err);
 		goto failed;
@@ -768,8 +769,8 @@ xal_be_xfs_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 		snprintf(shm_name, sizeof(shm_name), "%s_extents", opts->shm_name);
 		shm = shm_name;
 	}
-	err = xal_pool_map(&cand->extents, 40000000UL, cand->sb.nallocated, sizeof(struct xal_extent),
-	                   shm);
+	err = xal_pool_map(&cand->extents, 40000000UL, cand->sb.nallocated,
+			   sizeof(struct xal_extent), shm);
 	if (err) {
 		XAL_DEBUG("FAILED: xal_pool_map(extents); err(%d)", err);
 		goto failed;

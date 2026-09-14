@@ -61,7 +61,7 @@ xal_pool_grow(struct xal_pool *pool, size_t growby)
 
 int
 xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t element_size,
-             const char *shm_name)
+	     const char *shm_name)
 {
 	size_t nbytes = reserved * element_size;
 	int err;
@@ -121,8 +121,7 @@ xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t el
 		pool->allocated = 0;
 		pool->growby = allocated;
 
-		pool->memory =
-		    mmap(NULL, nbytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		pool->memory = mmap(NULL, nbytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 		if (MAP_FAILED == pool->memory) {
 			XAL_DEBUG("FAILED: mmap(...); errno(%d)", errno);
 			err = -errno;
