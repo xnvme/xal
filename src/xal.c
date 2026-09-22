@@ -54,12 +54,20 @@ xal_fsbno_offset(struct xal *xal, uint64_t fsbno)
 struct xal_inode *
 xal_inode_at(struct xal *xal, uint32_t idx)
 {
+	if (idx >= xal->inodes.allocated) {
+		return NULL;
+	}
+
 	return (struct xal_inode *)xal->inodes.memory + idx;
 }
 
 struct xal_extent *
 xal_extent_at(struct xal *xal, uint32_t idx)
 {
+	if (idx >= xal->extents.allocated) {
+		return NULL;
+	}
+
 	return (struct xal_extent *)xal->extents.memory + idx;
 }
 
@@ -382,12 +390,55 @@ int
 xal_index(struct xal *xal)
 {
 	struct xal_backend_base *be = (struct xal_backend_base *)&xal->be;
+	int err;
 
 	if (xal->procrole == XAL_PROCROLE_SECONDARY) {
 		return -EINVAL;
 	}
 
-	return be->index(xal);
+	/* Refuse the current index if an index is already running. */
+	if (atomic_exchange(&xal->indexing, true)) {
+		XAL_DEBUG("FAILED: an index is already running on this handle");
+		return -EBUSY;
+	}
+
+	err = be->index(xal);
+
+	atomic_store(&xal->last_index_err, err);
+	atomic_store(&xal->indexing, false);
+
+	return err;
+}
+
+static int
+_walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_data, int depth);
+
+/**
+ * Recurse into every child of a directory inode
+ *
+ * A base+count bound check is necessary for each child index.
+ */
+static int
+walk_dentries(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_data,
+	      int depth)
+{
+	for (uint32_t i = 0; i < inode->content.dentries.count; ++i) {
+		struct xal_inode *child;
+		int err;
+
+		child = xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
+		if (!child) {
+			XAL_DEBUG("FAILED: dentry index out of range; index rewritten under us");
+			return -ESTALE;
+		}
+
+		err = _walk(xal, child, cb_func, cb_data, depth + 1);
+		if (err) {
+			return err;
+		}
+	}
+
+	return 0;
 }
 
 static int
@@ -408,16 +459,8 @@ _walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_da
 	}
 
 	switch (inode->ftype) {
-	case XAL_ODF_DIR3_FT_DIR: {
-		struct xal_inode *inodes = xal_inode_at(xal, inode->content.dentries.inodes_idx);
-
-		for (uint32_t i = 0; i < inode->content.dentries.count; ++i) {
-			err = _walk(xal, &inodes[i], cb_func, cb_data, depth + 1);
-			if (err) {
-				return err;
-			}
-		}
-	} break;
+	case XAL_ODF_DIR3_FT_DIR:
+		return walk_dentries(xal, inode, cb_func, cb_data, depth);
 
 	case XAL_ODF_DIR3_FT_REG_FILE:
 		return 0;
@@ -426,16 +469,26 @@ _walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_da
 		XAL_DEBUG("FAILED: Unknown / unsupported ftype: %d", inode->ftype);
 		return -EINVAL;
 	}
-
-	return 0;
 }
 
 int
 xal_walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_data)
 {
+	if (!xal) {
+		XAL_DEBUG("FAILED: no xal given");
+		return -EINVAL;
+	}
+
 	if (xal_is_dirty(xal)) {
 		XAL_DEBUG("FAILED: File system has changed");
 		return -ESTALE;
+	}
+
+	/* Genuine bad inode. The dirty check above should have caught the reader vs rebuild
+	 * race. */
+	if (!inode) {
+		XAL_DEBUG("FAILED: no inode given");
+		return -EINVAL;
 	}
 
 	return _walk(xal, inode, cb_func, cb_data, 0);
@@ -574,6 +627,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	xal->inodes.memory = inodes_mem;
 	xal->inodes.element_size = sizeof(struct xal_inode);
 	xal->inodes.reserved = inodes_size / xal->inodes.element_size;
+	xal->inodes.allocated = xal->inodes.reserved;
 
 	/* EXTENTS */
 	shm_fd = shm_open(shm_name_extents, O_RDONLY, 0);
@@ -604,6 +658,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	xal->extents.memory = extents_mem;
 	xal->extents.element_size = sizeof(struct xal_extent);
 	xal->extents.reserved = extents_size / xal->extents.element_size;
+	xal->extents.allocated = xal->extents.reserved;
 
 	if (state->type == XAL_BACKEND_FIEMAP) {
 		struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
@@ -652,6 +707,7 @@ failed:
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode)
 {
+	struct xal_inode *parent;
 	int wrtn = 0;
 
 	if (!inode) {
@@ -661,7 +717,12 @@ xal_inode_path_pp(struct xal *xal, struct xal_inode *inode)
 		return wrtn;
 	}
 
-	wrtn += xal_inode_path_pp(xal, xal_inode_at(xal, inode->parent_idx));
+	parent = xal_inode_at(xal, inode->parent_idx);
+	if (!parent) {
+		return wrtn;
+	}
+
+	wrtn += xal_inode_path_pp(xal, parent);
 	wrtn += printf("/%.*s", inode->namelen, inode->name);
 
 	return wrtn;
@@ -768,14 +829,25 @@ search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *b
 		struct xal_inode *child;
 		size_t search_len = search_end ? (size_t)(search_end - search_begin) : strlen(search_begin);
 		char component[search_len + 1];
+		uint32_t span_idx = search->content.dentries.inodes_idx;
+		uint32_t span_count = search->content.dentries.count;
 
 		memcpy(component, search_begin, search_len);
 		component[search_len] = '\0';
 
 		XAL_DEBUG("Searching for component(%s)", component);
 
-		child = bsearch(component, xal_inode_at(xal, search->content.dentries.inodes_idx),
-				search->content.dentries.count, sizeof(struct xal_inode), compare_name_to_inode);
+		/* bsearch reads the whole span, so check both ends are in range. Search within the
+		 * checked range, since the actual values could have changed, and changed values
+		 * could be out of bounds again. */
+		if (span_count && ((span_count > xal->inodes.allocated) ||
+				   (span_idx > xal->inodes.allocated - span_count))) {
+			XAL_DEBUG("FAILED: dentry span out of range; index rewritten under us");
+			return -ESTALE;
+		}
+
+		child = bsearch(component, xal_inode_at(xal, span_idx), span_count,
+				sizeof(struct xal_inode), compare_name_to_inode);
 
 		if (!child) {
 			XAL_DEBUG("Component(%s) not found", component);
@@ -807,6 +879,7 @@ int
 xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 {
 	struct xal_backend_base *be;
+	struct xal_inode *root;
 	int err = 0;
 
 	if (!xal) {
@@ -833,7 +906,12 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 
 	switch (be->type) {
 	case XAL_BACKEND_XFS:
-		return search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, "", inode);
+		root = xal_inode_at(xal, xal->root_idx);
+		if (!root) {
+			XAL_DEBUG("FAILED: root index out of range; index rewritten under us");
+			return -ESTALE;
+		}
+		return search_by_traversal(xal, root, path, "", inode);
 	case XAL_BACKEND_FIEMAP:
 		return xal_be_fiemap_get_inode(xal, path, inode);
 	default:

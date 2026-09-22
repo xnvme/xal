@@ -117,8 +117,9 @@ publish(const struct xal_server_conf *conf, struct xal_server_watch *watch, stru
 		goto failed;
 	}
 
-	/* Reflink snapshot mode pins extents with clones at index time and runs no watcher. */
-	if (conf->watch_mode && (conf->watch_mode != XAL_WATCHMODE_REFLINK_SNAPSHOT)) {
+	/* Reflink snapshot mode runs the watcher too: the clones are what keep a reader's extents
+	 * valid, the watcher is what tells it the snapshot has gone stale. */
+	if (conf->watch_mode) {
 		err = xal_watch_filesystem(xal, on_dirty, watch);
 		if (err) {
 			syslog(LOG_ERR, "FAILED: xal_watch_filesystem(%s); err(%d)", dev->uri, err);

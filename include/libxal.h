@@ -44,10 +44,34 @@ enum xal_backend {
 };
 
 enum xal_watchmode {
-	XAL_WATCHMODE_NONE             = 0,  ///< There will be no notifications of changes to the filesystem.
-	XAL_WATCHMODE_DIRTY_DETECTION  = 1,  ///< When changes to the file system occurs, the xal struct will become "dirty" indicating that the representation of the file system is stale.
-	XAL_WATCHMODE_EXTENT_UPDATE    = 2,  ///< When other changes to the file system occurs, the xal struct will be automatically updated if the extent information is the only subject to change, otherwise the xal struct will become "dirty" indicating that the representation of the file system is stale.
-	XAL_WATCHMODE_REFLINK_SNAPSHOT = 3,  ///< At xal_index() time, reflink every regular file (optionally restricted to opts.subtree) into a private snapshot and capture extents from the clones. The clones pin their blocks for the xal session, so the extents returned by xal_get_extents() stay valid under concurrent writes. No inotify watch or filesystem freeze is used; clones are removed at xal_close().
+	/**
+	 * Nothing is watched and nothing is pinned.
+	 *
+	 * The extents are a snapshot of the filesystem as it was at xal_index() time, and a
+	 * foreign write can invalidate them at any point. For a caller that owns the filesystem;
+	 * see xal_mark_dirty() to signal a change made by the caller itself.
+	 */
+	XAL_WATCHMODE_NONE = 0,
+
+	/**
+	 * Reflink every regular file into a private snapshot at xal_index() time (optionally
+	 * restricted to opts.subtree) and capture extents from the clones, so no foreign write
+	 * can move a block out from under a published extent.
+	 *
+	 * The pinning does not mean extents never change; it means only xal_index() can change
+	 * them. A foreign write is undetectable in time; a re-snapshot is an event this library
+	 * controls and reports by advancing the sequence lock. See xal_get_extents() for the
+	 * reader protocol that depends on it, and xal_index() for what a re-snapshot does to the
+	 * previous one.
+	 *
+	 * Reserves a name: entries called ".xal_snapshot.*" are excluded from the index at every
+	 * depth, since that is where the clones live, so a file or directory of that name is
+	 * invisible to xal_get_inode() and xal_get_extents(). Clones are removed at xal_close().
+	 *
+	 * An inotify watch runs alongside; xal_is_dirty() becoming true then means the filesystem
+	 * has moved on, not that anything in hand went bad.
+	 */
+	XAL_WATCHMODE_REFLINK_SNAPSHOT = 1,
 };
 
 enum xal_file_lookupmode {
@@ -60,8 +84,14 @@ struct xal_opts {
 	enum xal_watchmode watch_mode;
 	enum xal_file_lookupmode file_lookupmode;
 	const char *mountpoint;
-	const char *shm_name; ///< If set, pool memory is backed by POSIX shared memory with this base name, see @xal_from_pools() for sharing the pools across processes
-	const char *subtree; ///< FIEMAP backend only: absolute path at or under the mountpoint to scope the index to. Only files under it are indexed (and, in XAL_WATCHMODE_REFLINK_SNAPSHOT, reflinked). NULL/empty indexes the whole mount. Ignored by the XFS backend.
+	/** If set, pool memory is backed by POSIX shared memory under this base name; see
+	 *  xal_from_shm() for attaching to the pools from another process. */
+	const char *shm_name;
+
+	/** FIEMAP backend only: absolute path at or under the mountpoint to scope the index to.
+	 *  Only files beneath it are indexed, and in XAL_WATCHMODE_REFLINK_SNAPSHOT only those
+	 *  are reflinked. NULL or empty indexes the whole mount. Ignored by the XFS backend. */
+	const char *subtree;
 };
 
 struct xal_extent {
@@ -144,9 +174,22 @@ struct xal_sb {
 	uint32_t lba_blksze;   ///< LBA block size
 };
 
+/**
+ * Resolve a pool index to the element it names, or NULL when it names nothing
+ *
+ * NULL means the index is outside the pool. For a reader attached to a published index that
+ * means xal_index() rewrote the pools underneath it, so the index it read was never valid.
+ * Treat NULL as the signal to re-read under the sequence lock (see xal_get_extents()), not as
+ * an error about the file. It is bounds-checked rather than left to fault because a fault
+ * never reaches the sequence comparison that would have told the reader to retry.
+ *
+ * The check covers one element. Check every element of a {idx, count} span, not just the
+ * base: idx and count are read separately, so either can be stale.
+ */
 struct xal_inode *
 xal_inode_at(struct xal *xal, uint32_t idx);
 
+/** @see xal_inode_at() */
 struct xal_extent *
 xal_extent_at(struct xal *xal, uint32_t idx);
 
@@ -308,7 +351,20 @@ xal_dinodes_retrieve(struct xal *xal);
  * backend XAL_BACKEND_XFS.
  * 
  * When called, any index created from previous calls to xal_index() are cleared.
- * 
+ *
+ * In XAL_WATCHMODE_REFLINK_SNAPSHOT this re-snapshots, and the clones holding the previous
+ * index's blocks are destroyed before the new ones are made. Every extent the previous index
+ * produced is invalidated, and the blocks behind them stop being pinned. The sequence lock is
+ * advanced across the rebuild, which is what lets a reader following the protocol in
+ * xal_get_extents() find out; a reader that cached block addresses outside that protocol has no
+ * way to.
+ *
+ * Takes exactly one caller at a time. A second concurrent call on the same handle returns
+ * -EBUSY rather than interleaving, and the watch callback installed by xal_watch_filesystem()
+ * counts as a caller: a caller that re-indexes from its own thread as well should expect one of
+ * the two to be refused. Interleaved indexes are not merely wasteful -- they can produce extents
+ * that were never a file's, from a call that reports success.
+ *
  * This function will fail if given a xal handle obtained from xal_from_shm().
  *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
@@ -322,6 +378,15 @@ xal_index(struct xal *xal);
  * detected or marked via xal_mark_dirty(), and the in-memory representation is now stale.
  *
  * The callback is called from the watch thread; keep it short and thread-safe.
+ *
+ * A callback that calls xal_index() is a caller of it like any other, so a program that also
+ * re-indexes from another thread has two, and xal_index() refuses the second with -EBUSY. Pick
+ * one place to re-index.
+ *
+ * xal_index() arms one inotify watch per directory for any watch mode other than
+ * XAL_WATCHMODE_NONE, whether or not xal_watch_filesystem() is ever called. Those watches come
+ * out of fs.inotify.max_user_watches, a per-UID budget shared with every other process, and a
+ * tree with more directories than the budget has left fails to index with -ENOSPC.
  *
  * @param xal     The xal struct that became dirty.
  * @param cb_args The opaque pointer passed to xal_watch_filesystem().
@@ -450,7 +515,7 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode);
  * Build a path-to-inode hash map from the in-memory inode tree.
  *
  * Intended for use after xal_open() without opts->file_lookupmode not set to 
- * XAL_FILE_LOOKUPMODE_HASHMAP, or after xal_from_pools(), where xal_index() is not
+ * XAL_FILE_LOOKUPMODE_HASHMAP, or after xal_from_shm(), where xal_index() is not
  * called but the caller wants constant-time inode lookup via xal_get_inode(). Walks
  * the existing tree and populates the hash map locally. Any previously existing
  * map is replaced.
@@ -469,6 +534,21 @@ xal_build_lookup_hashmap(struct xal *xal);
  * 
  * This will search through the tree at xal->root to find the inode. This call fails if the entry
  * at the given path is not a file.
+ *
+ * The result points into the pools -- shared memory for a handle from xal_from_shm() -- and
+ * struct xal_extents indexes those pools rather than carrying the block addresses, so this is a
+ * reference to live state, not a copy. It is valid for as long as the sequence lock is unchanged.
+ * Read it under the lock, and take the second reading after the reads it resolved have completed,
+ * not merely after issuing them:
+ *
+ *     do {
+ *             seq = xal_get_seq_lock(xal);
+ *             // resolve extents, issue the reads
+ *     } while (seq != xal_get_seq_lock(xal));
+ *
+ * A re-snapshot frees the blocks behind extents resolved under an earlier sequence number, so an
+ * I/O still in flight can land on blocks another file has since been given. The check after
+ * completion tells you the data is not trustworthy; it does not prevent the transfer.
  * 
  * @param xal The xal struct obtained when opened with xal_open()
  * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
@@ -496,47 +576,5 @@ xal_get_extents(struct xal *xal, char *path, struct xal_extents **extents);
 int
 xal_get_dentries(struct xal *xal, char *path, struct xal_dentries **dentries);
 
-#ifdef XAL_BPF_ENABLED
-/**
- * Start a background thread polling the BPF ring buffer for filesystem events
- * (e.g. unfreeze) on the block device.
- *
- * Assumes that
- *  - you have run xal_open() with backend FIEMAP and BPF event listening enabled,
- *  - the BPF skeleton and ring buffer have been initialized.
- *
- * If the thread is already running, this is a no-op and 0 is returned.
- *
- * @param xal The xal struct obtained when opened with xal_open().
- *
- * @returns On success, 0 is returned. On error, a negative errno is returned to indicate the
- *          error: -EINVAL if xal is NULL; -ENOTSUP if the backend is not FIEMAP; -ENODEV if xal
- *          was not opened with BPF event listening; -ENOTCONN if the BPF skeleton is not
- *          initialized; -ENOBUFS if the ring buffer is not initialized; or the negated errno
- *          from pthread_create() if thread creation fails.
- */
-int
-xal_bpf_start_poll_thread(struct xal *xal);
-
-/**
- * Stop the background thread polling the BPF ring buffer.
- *
- * Assumes that
- *  - you have run xal_open() with backend FIEMAP and BPF event listening enabled,
- *  - the background thread is running, see xal_bpf_start_poll_thread().
- *
- * If these assumptions do not hold, this will result in an error.
- *
- * @param xal The xal struct obtained when opened with xal_open().
- *
- * @returns On success, 0 is returned. On error, a negative errno is returned to indicate the
- *          error: -EINVAL if xal is NULL; -ENOTSUP if the backend is not FIEMAP; -ENODEV if xal
- *          was not opened with BPF event listening; -ENOTCONN if the BPF skeleton is not
- *          initialized; -ESRCH if the background thread is not running; or the negated errno
- *          from pthread_join() if joining the thread fails.
- */
-int
-xal_bpf_stop_poll_thread(struct xal *xal);
-#endif /* XAL_BPF_ENABLED */
 
 #endif /* LIBXAL_H */

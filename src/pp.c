@@ -180,12 +180,16 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode)
 
 	switch (inode->ftype) {
 	case XAL_ODF_DIR3_FT_DIR:
-		struct xal_inode *children = xal_inode_at(xal, inode->content.dentries.inodes_idx);
-
 		wrtn += printf("  dentries.count: %u\n", inode->content.dentries.count);
 
 		for (uint8_t i = 0; i < inode->content.dentries.count; ++i) {
-			xal_inode_pp(xal, &children[i]);
+			struct xal_inode *child = xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
+
+			if (!child) {
+				wrtn += printf("  dentries: ~ # index out of range\n");
+				break;
+			}
+			xal_inode_pp(xal, child);
 		}
 
 		break;
@@ -196,6 +200,11 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode)
 		for (uint32_t i = 0; i < inode->content.extents.count; ++i) {
 			struct xal_extent *extent = xal_extent_at(xal, inode->content.extents.extent_idx + i);
 	        size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
+
+			if (!extent) {
+				wrtn += printf("- ~ # index out of range\n");
+				break;
+			}
 
 	        fofz_begin = (extent->start_offset * blocksize) / BMAP_BLOCK_SIZE;
 	        fofz_end = fofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
@@ -385,12 +394,8 @@ xal_inotify_pp(struct xal_inotify *inotify)
 			wrtn += printf("  watchmode: XAL_WATCHMODE_NONE\n");
 			break;
 
-		case XAL_WATCHMODE_DIRTY_DETECTION:
-			wrtn += printf("  watchmode: XAL_WATCHMODE_DIRTY_DETECTION\n");
-			break;
-
-		case XAL_WATCHMODE_EXTENT_UPDATE:
-			wrtn += printf("  watchmode: XAL_WATCHMODE_EXTENT_UPDATE\n");
+		case XAL_WATCHMODE_REFLINK_SNAPSHOT:
+			wrtn += printf("  watchmode: XAL_WATCHMODE_REFLINK_SNAPSHOT\n");
 			break;
 
 		default:

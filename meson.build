@@ -11,7 +11,6 @@ project('xal', 'c',
 )
 
 pkg = import('pkgconfig')
-fs = import('fs')
 cc = meson.get_compiler('c')
 
 xallib_libdir = get_option('libdir')
@@ -42,7 +41,6 @@ sources = files(
   'src/xal.c',
   'src/xal_be_fiemap.c',
   'src/xal_be_fiemap_inotify.c',
-  'src/xal_bpf.c',
   'src/xal_be_xfs.c',
   'src/xal_pool.c',
   'src/pp.c',
@@ -53,97 +51,8 @@ xal_sources = [sources]
 
 include_dirs = include_directories('include', 'tp')
 
-# BPF: BTF source file
-vmlinux_btf = '/sys/kernel/btf/vmlinux'
-
-# BPF: build dependencies
-libbpf_dep = dependency('libbpf', required: false)
-bpf_enabled = libbpf_dep.found()
-
-if bpf_enabled and not fs.exists(vmlinux_btf)
-  message('BPF: disabled, no kernel BTF at ' + vmlinux_btf)
-  bpf_enabled = false
-endif
-
-if bpf_enabled
-  libelf_dep = dependency('libelf', required: true)
-  zlib_dep = dependency('zlib', required: true)
-
-  bpftool = find_program('bpftool', required: true)
-  clang = find_program('clang', required: true)
-
-  # BPF: generate vmlinux.h
-  vmlinux_h = custom_target(
-    'xal-vmlinux-h',
-    output : 'vmlinux.h',
-    command : [bpftool, 'btf', 'dump', 'file', vmlinux_btf, 'format', 'c'],
-    capture : true
-  )
-
-  # BPF: map host cpu_family() to the __TARGET_ARCH_* macro libbpf expects
-  bpf_arch_map = {
-    'x86_64'  : 'x86',
-    'x86'     : 'x86',
-    'aarch64' : 'arm64',
-    'arm'     : 'arm',
-    'ppc64'   : 'powerpc',
-    'riscv64' : 'riscv',
-    's390x'   : 's390',
-    'mips64'  : 'mips',
-    'mips'    : 'mips',
-  }
-  bpf_cpu = host_machine.cpu_family()
-  if not bpf_arch_map.has_key(bpf_cpu)
-    error('Unsupported BPF target arch: ' + bpf_cpu)
-  endif
-
-  # BPF: compile flags
-  bpf_cflags = [
-    '-O2', '-g',
-    '-target', 'bpf',
-    '-D__TARGET_ARCH_' + bpf_arch_map[bpf_cpu],
-    '-I' + meson.current_build_dir(),
-    '-I' + meson.current_source_dir() / 'src',
-    '-I' + meson.current_source_dir() / 'include',
-  ]
-
-  # BPF: build .bpf.o
-  bpf_obj = custom_target(
-    'xal-bpf-events-obj',
-    input : ['src/xal_bpf_events.bpf.c', vmlinux_h],
-    output : 'xal_bpf_events.bpf.o',
-    command : [
-      clang,
-    bpf_cflags,
-    '-c', '@INPUT0@',
-    '-o', '@OUTPUT@'
-    ]
-  )
-
-  # BPF: generate skeleton
-  # 'name' overrides the struct/prefix bpftool would otherwise derive from the
-  # object basename ("xal_bpf_events_bpf"). Keep this in sync with the struct
-  # name used in src/xal_bpf.c and include/xal_bpf.h.
-  skel = custom_target(
-    'xal-bpf-events-skel',
-    input : bpf_obj,
-    output : 'xal_bpf_events.skel.h',
-    command : [bpftool, 'gen', 'skeleton', '@INPUT@', 'name', 'xal_bpf_events'],
-    capture : true
-  )
-
-  xallib_deps += [
-    libbpf_dep,
-    libelf_dep,
-    zlib_dep,
-  ]
-
-  xal_sources += [skel]
-endif
-
 conf_data = configuration_data()
 conf_data.set('XAL_DEBUG_ENABLED', get_option('buildtype') == 'debug' and get_option('debug-logging'))
-conf_data.set('XAL_BPF_ENABLED', bpf_enabled)
 
 conf = configure_file(
   configuration : conf_data,

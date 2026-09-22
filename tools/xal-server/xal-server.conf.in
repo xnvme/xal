@@ -23,5 +23,12 @@ log_level = 2
 devices = []
 
 [xal]
-# none = 0, dirty detection = 1, extent update = 2, reflink snapshot = 3
-watchmode = 2
+# none = 0, reflink snapshot = 1. Nothing else is valid; see enum xal_watchmode.
+#
+#   none              nothing is watched and nothing is pinned. The published extents are a
+#                     snapshot of the filesystem as it was at index time and a foreign write can
+#                     invalidate them at any point. For a deployment that owns the filesystem.
+#   reflink snapshot  every indexed file is cloned into a shadow directory, so the blocks stay
+#                     pinned and readers keep valid LBAs under foreign writes. Needs an XFS
+#                     mount made with reflink=1, and CAP_LINUX_IMMUTABLE to protect the clones.
+watchmode = 0

@@ -8,11 +8,23 @@
 
 struct xal_inotify {
 	enum xal_watchmode watch_mode;
-	int fd;           ///< File descriptor for inotify events, if opened with some xal_watchmode, else 0
-	void *inode_map;  ///< Map of inodes from inotify watch descriptors
+	int fd;           ///< inotify descriptor, or -1 when no watch mode is in use
+	void *inode_map;  ///< Set of watch descriptors held by this instance
 	pthread_t watch_thread_id;
 	atomic_int flag;
 	atomic_bool stop;
+
+	/**
+	 * Serialises starting the watch thread against reaping it.
+	 *
+	 * watch_thread_id is a plain pthread_t written by pthread_create() and read by every
+	 * reaper, so the flags alone cannot make the pair consistent: whichever side of
+	 * pthread_create() they are raised on, a reaper can observe one without the other and
+	 * either skip a join it owed or join an id nothing has written. Publishing the id and
+	 * the flags in one critical section removes that choice.
+	 */
+	pthread_mutex_t lifecycle;
+
 	xal_dirty_cb cb;
 	void *cb_args;
 };
@@ -37,11 +49,11 @@ int
 xal_be_fiemap_inotify_drain(struct xal_inotify *inotify);
 
 /**
- * Clear the watch descriptor to inode hash table on the given xal_inotify struct.
- * 
- * This is to be used when running xal_index() to ensure that the table points to
- * the correct inodes and none other.
- * 
+ * Drop every watch this instance holds, both the kernel watch and the map entry.
+ *
+ * Run before the drain in xal_index(), since each removal queues an IN_IGNORED. The walk
+ * re-adds a watch for every directory it reads.
+ *
  * @param inotify  Pointer to the xal_inotify struct.
  */
 int

@@ -117,6 +117,10 @@ pp_inode_extents(struct xal *xal, struct xal_inode *inode)
 		struct xal_extent *extent = xal_extent_at(xal, inode->content.extents.extent_idx + i);
 		size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
 
+		if (!extent) {
+			break;
+		}
+
 		fofz_begin = (extent->start_offset * blocksize) / 512;
 		fofz_end = fofz_begin + (extent->nblocks * blocksize) / 512 - 1;
 		bofz_begin = xal_fsbno_offset(xal, extent->start_block) / 512;

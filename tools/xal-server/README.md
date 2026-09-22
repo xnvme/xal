@@ -30,8 +30,15 @@ devices = [
 ]
 
 [xal]
-# none = 0, dirty detection = 1, extent update = 2, reflink snapshot = 3
-watchmode = 2
+# none = 0, reflink snapshot = 1. Nothing else is valid; see enum xal_watchmode.
+#
+#   none              nothing is watched and nothing is pinned. The published extents are a
+#                     snapshot of the filesystem as it was at index time and a foreign write can
+#                     invalidate them at any point. For a deployment that owns the filesystem.
+#   reflink snapshot  every indexed file is cloned into a shadow directory, so the blocks stay
+#                     pinned and readers keep valid LBAs under foreign writes. Needs an XFS
+#                     mount made with reflink=1, and CAP_LINUX_IMMUTABLE to protect the clones.
+watchmode = 0
 ```
 
 | Key | Required | Meaning |
@@ -115,8 +122,29 @@ changes, rewriting the pools in place under a sequence lock. Attached readers se
 without reattaching, but a walk that raced the rewrite fails with `-ESTALE`; check
 `xal_is_dirty()`, or retry.
 
-`XAL_WATCHMODE_REFLINK_SNAPSHOT` is the exception: it pins extents with reflink clones at index
-time rather than watching, so the published index does not change for the life of the server.
+`XAL_WATCHMODE_REFLINK_SNAPSHOT` watches too, and pins the blocks so that only a re-index by this
+server can change what a reader sees. See `enum xal_watchmode` in `libxal.h` for the guarantee in
+full.
+
+### Reader protocol
+
+A reader works against the shared region by reference and validates the sequence lock around use:
+
+```c
+do {
+        seq = xal_get_seq_lock(xal);        /* even, or the pools are mid-rewrite */
+        /* resolve extents, issue the reads, wait for completion */
+} while (seq != xal_get_seq_lock(xal));     /* changed? the data is not trustworthy, retry */
+```
+
+Take the second reading **after the I/O has completed**, not after merely issuing it, and note
+that the check catches a bad read rather than preventing it. `xal_get_extents()` in `libxal.h`
+documents why.
+
+One operational consequence: a read that raced a re-index can deliver another file's bytes into
+the reader's buffer. On a mount the reader already has read access to, that is a correctness
+problem solved by discarding and retrying -- treat it as an isolation problem only if the reader
+is not trusted with the rest of the filesystem.
 
 If re-indexing fails, the server logs `the index is stale, restart required` at CRITICAL and the
 index stays dirty. It does not recover on its own.
