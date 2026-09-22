@@ -23,6 +23,16 @@ build:
 install:
 	meson install -C $(BUILDDIR)
 
+# Run code format on staged changes
+.PHONY: format
+format:
+	pre-commit run
+
+# Run code format on all files
+.PHONY: format-all
+format-all:
+	pre-commit run --all-files
+
 .PHONY: test-using-nvme
 test-using-nvme:
 	cd cijoe && cijoe workflows/prep_and_test.yaml \

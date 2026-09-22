@@ -90,9 +90,9 @@ main(int argc, char *argv[])
 
 	// Install handlers, then block SIGTERM/SIGINT before announcing readiness. Waiting with
 	// sigsuspend (which atomically restores the unblocked mask and waits) closes the classic
-	// pause() race: a signal arriving between the g_stop test and the wait would set g_stop while
-	// blocked and be delivered on the next sigsuspend, rather than being lost with the process
-	// stuck sleeping forever.
+	// pause() race: a signal arriving between the g_stop test and the wait would set g_stop
+	// while blocked and be delivered on the next sigsuspend, rather than being lost with the
+	// process stuck sleeping forever.
 	sigset_t block, orig;
 
 	sa.sa_handler = on_signal;
@@ -109,7 +109,8 @@ main(int argc, char *argv[])
 	fflush(stdout);
 
 	while (!g_stop) {
-		sigsuspend(&orig); // unblock SIGTERM/SIGINT and wait atomically; no missed-signal window
+		sigsuspend(
+		    &orig); // unblock SIGTERM/SIGINT and wait atomically; no missed-signal window
 	}
 
 	sigprocmask(SIG_SETMASK, &orig, NULL);

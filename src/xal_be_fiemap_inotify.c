@@ -117,7 +117,7 @@ xal_be_fiemap_inotify_drain(struct xal_inotify *inotify)
 int
 xal_be_fiemap_inotify_clear_inode_map(struct xal_inotify *inotify)
 {
-	khash_t(wd_to_inode) *inode_map;
+	khash_t(wd_to_inode) * inode_map;
 
 	if (!inotify) {
 		XAL_DEBUG("FAILED: No inotify object given");
@@ -134,8 +134,9 @@ xal_be_fiemap_inotify_clear_inode_map(struct xal_inotify *inotify)
 int
 xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path, struct xal_inode *inode)
 {
-	khash_t(wd_to_inode) *inode_map;
-	uint32_t mask = IN_CREATE | IN_DELETE | IN_MOVE | IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_UNMOUNT;
+	khash_t(wd_to_inode) * inode_map;
+	uint32_t mask =
+	    IN_CREATE | IN_DELETE | IN_MOVE | IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_UNMOUNT;
 	khiter_t iter;
 	int wd, err;
 
@@ -170,7 +171,8 @@ xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path, struc
 }
 
 static __attribute__((unused)) int
-inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
+inotify_event_mask_pp(uint32_t mask, char *str, int str_sz)
+{
 	int wrtn, idx = 0;
 
 	if (mask & IN_MODIFY) {
@@ -220,7 +222,7 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 {
 	struct xal_inode *dir_inode, *inode;
 	kh_wd_to_inode_t *inode_map;
-	char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
 	char path[XAL_PATH_MAXLEN];
 	khiter_t iter;
 	ssize_t len, i;
@@ -238,11 +240,12 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 			struct inotify_event *event = (struct inotify_event *)&buf[i];
 			__attribute__((unused)) char mask_pp[128];
 
-			inode = NULL;  // reset the pointer to the inode
+			inode = NULL; // reset the pointer to the inode
 			wd = event->wd;
 
 			XAL_DEBUG_FCALL(inotify_event_mask_pp, event->mask, mask_pp, 128);
-			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1], wd, event->name)
+			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1],
+				  wd, event->name)
 
 			if (inotify->watch_mode == XAL_WATCHMODE_DIRTY_DETECTION) {
 				XAL_DEBUG("INFO: File system has changed;");
@@ -259,33 +262,41 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 			if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE)) {
 				iter = kh_get(wd_to_inode, inode_map, wd);
 				if (iter == kh_end(inode_map)) {
-					XAL_DEBUG("FAILED: kh_get(%d) for event with name(%s)", wd, event->name);
+					XAL_DEBUG("FAILED: kh_get(%d) for event with name(%s)", wd,
+						  event->name);
 					return XAL_INOTIFY_REINDEX;
 				}
 
-				XAL_DEBUG("INFO: found watch descriptor(%d) for event with name(%s)", wd, event->name);
+				XAL_DEBUG(
+				    "INFO: found watch descriptor(%d) for event with name(%s)", wd,
+				    event->name);
 
 				dir_inode = kh_val(inode_map, iter);
 				if (!xal_inode_is_dir(dir_inode)) {
-					XAL_DEBUG("FAILED: found inode(%s) is not a directory", dir_inode->name);
+					XAL_DEBUG("FAILED: found inode(%s) is not a directory",
+						  dir_inode->name);
 					return XAL_INOTIFY_REINDEX;
 				}
 
-				if (dir_inode->namelen + 1 + strlen(event->name) + 1 > sizeof(path)) {
+				if (dir_inode->namelen + 1 + strlen(event->name) + 1 >
+				    sizeof(path)) {
 					XAL_DEBUG("FAILED: event(%s) full path too long(%zu)",
-							event->name, dir_inode->namelen + 1 + strlen(event->name) + 1);
+						  event->name,
+						  dir_inode->namelen + 1 + strlen(event->name) + 1);
 					return XAL_INOTIFY_REINDEX;
 				}
 				memcpy(path, dir_inode->name, dir_inode->namelen);
 				path[dir_inode->namelen] = '/';
-				memcpy(path + dir_inode->namelen + 1, event->name, strlen(event->name));
+				memcpy(path + dir_inode->namelen + 1, event->name,
+				       strlen(event->name));
 				path[dir_inode->namelen + 1 + strlen(event->name)] = '\0';
 
 				XAL_DEBUG("INFO: got full path of event: %s", path);
 				atomic_fetch_add(xal->seq_lock, 1);
 
 				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
-					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
+					struct xal_inode *child = xal_inode_at(
+					    xal, dir_inode->content.dentries.inodes_idx + j);
 
 					if (strcmp(child->name, path) == 0) {
 						inode = child;
@@ -294,7 +305,8 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				}
 
 				if (!inode) {
-					XAL_DEBUG("FAILED: could not find child with name(%s)", event->name);
+					XAL_DEBUG("FAILED: could not find child with name(%s)",
+						  event->name);
 					err = XAL_INOTIFY_REINDEX;
 					goto failed_with_lock;
 				}
@@ -304,7 +316,9 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 
 				err = xal_be_fiemap_process_inode_file(xal, path, inode);
 				if (err) {
-					XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_file(); err(%d)", err);
+					XAL_DEBUG(
+					    "FAILED: xal_be_fiemap_process_inode_file(); err(%d)",
+					    err);
 					err = XAL_INOTIFY_REINDEX;
 					goto failed_with_lock;
 				}
@@ -312,7 +326,9 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				// Update to new file size
 				err = stat(path, &st);
 				if (err) {
-					XAL_DEBUG("FAILED: stat(%s) errno(%d) while getting new file size", path, errno);
+					XAL_DEBUG("FAILED: stat(%s) errno(%d) while getting new "
+						  "file size",
+						  path, errno);
 					err = XAL_INOTIFY_REINDEX;
 					goto failed_with_lock;
 				}
@@ -412,7 +428,9 @@ background_thread_start(void *arg)
 
 		err = check_events(xal, be->inotify);
 		if (err < 0) {
-			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_check_events(), exit thread; err(%d)", err);
+			XAL_DEBUG(
+			    "FAILED: xal_be_fiemap_inotify_check_events(), exit thread; err(%d)",
+			    err);
 			/* Nothing re-indexes once this loop is left, so leave the index dirty:
 			 * readers get -ESTALE instead of extents for a vanished filesystem. */
 			xal_mark_dirty(xal);
@@ -423,7 +441,6 @@ background_thread_start(void *arg)
 			XAL_DEBUG("INFO: Found breaking changes, marking xal as dirty");
 			xal_mark_dirty(xal);
 		}
-
 	}
 
 exit_thread:

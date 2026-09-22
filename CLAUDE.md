@@ -91,7 +91,7 @@ Inodes and extents are stored in separate contiguous pools backed by `mmap`. Poo
 ## Code style
 
 - C11 (`gnu11`), LLVM-based clang-format with tabs (width 8), 100-column limit
-- Format code: `clang-format -i src/*.c include/*.h` (config in `.clang-format`)
+- Format code: `make format` (staged changes) or `make format-all` (all files), via pre-commit
 - Function return type on its own line
 - Opening brace on new line for functions, same line for control flow (1TBS variant)
 - XFS on-disk values are big-endian; all public structs use native byte order

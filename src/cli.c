@@ -53,14 +53,16 @@ parse_args(int argc, char *argv[], struct xal_cli_args *args)
 		} else if (strcmp(argv[i], "--file_lookup_map") == 0) {
 			args->file_lookup_map = 1;
 		} else if (strcmp(argv[i], "--backend") == 0) {
-			if (i+1 >= argc) {
-				fprintf(stderr, "Error: Backend argument must define a valid backend (choices: xfs, fiemap)\n");
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Error: Backend argument must define a valid "
+						"backend (choices: xfs, fiemap)\n");
 				return -EINVAL;
 			}
 			args->backend = argv[++i];
 		} else if (strcmp(argv[i], "--filename") == 0) {
-			if (i+1 >= argc) {
-				fprintf(stderr, "Error: Filename argument must define a valid path: --filename <filename>\n");
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Error: Filename argument must define a valid "
+						"path: --filename <filename>\n");
 				return -EINVAL;
 			}
 			args->filename = argv[++i];
@@ -84,8 +86,7 @@ parse_args(int argc, char *argv[], struct xal_cli_args *args)
  * Produces output on stdout similar to the output produced by running "find /mount/point"
  */
 int
-node_inspector_find(struct xal *xal, struct xal_inode *inode, void *cb_args,
-		    int XAL_UNUSED(level))
+node_inspector_find(struct xal *xal, struct xal_inode *inode, void *cb_args, int XAL_UNUSED(level))
 {
 	struct xal_nodeinspector_args *args = cb_args;
 
@@ -114,7 +115,8 @@ pp_inode_extents(struct xal *xal, struct xal_inode *inode)
 	uint32_t blocksize = xal_get_sb_blocksize(xal);
 
 	for (uint32_t i = 0; i < inode->content.extents.count; ++i) {
-		struct xal_extent *extent = xal_extent_at(xal, inode->content.extents.extent_idx + i);
+		struct xal_extent *extent =
+		    xal_extent_at(xal, inode->content.extents.extent_idx + i);
 		size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
 
 		fofz_begin = (extent->start_offset * blocksize) / 512;
@@ -275,4 +277,3 @@ exit:
 
 	return -err;
 }
-

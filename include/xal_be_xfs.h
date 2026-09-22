@@ -20,10 +20,10 @@ struct xal_ag {
 
 struct xal_be_xfs {
 	struct xal_backend_base base;
-	void *buf;            ///< A single buffer for repetitive IO
-	uint8_t *dinodes;     ///< Array of inodes in on-disk-format
-	void *dinodes_map;    ///< Map of dinodes for O(1) ~ avg. lookup
-	struct xal_ag *ags;   ///< Array of 'agcount' number of allocation-groups
+	void *buf;	    ///< A single buffer for repetitive IO
+	uint8_t *dinodes;   ///< Array of inodes in on-disk-format
+	void *dinodes_map;  ///< Map of dinodes for O(1) ~ avg. lookup
+	struct xal_ag *ags; ///< Array of 'agcount' number of allocation-groups
 
 	uint8_t _rsvd[16];
 };
