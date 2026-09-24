@@ -379,9 +379,9 @@ decode_iab3_leaf_records(struct xal *xal, struct xal_ag *ag, void *buf, uint64_t
 		/**
 		 * Traverse the inodes in the chunk, skipping unused and free inodes.
 		 */
-		for (uint8_t chunk_index = 0; chunk_index < rec->count; ++chunk_index) {
+		for (uint8_t chunk_index = 0; chunk_index < CHUNK_NINO; ++chunk_index) {
 			uint8_t *chunk_cursor = &inodechunk[chunk_index * xal->sb.inodesize];
-			uint64_t is_unused = (rec->holemask & (1ULL << chunk_index)) >> chunk_index;
+			uint64_t is_unused = (rec->holemask >> (chunk_index / 4)) & 1;
 			uint64_t is_free = (rec->free & (1ULL << chunk_index)) >> chunk_index;
 			khash_t(ino_to_dinode) *dinodes_map = be->dinodes_map;
 			struct xal_odf_dinode *dinode;
