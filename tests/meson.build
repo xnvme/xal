@@ -1,1 +1,2 @@
 subdir('unit')
+subdir('integration')

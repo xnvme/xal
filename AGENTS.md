@@ -24,6 +24,8 @@ Unit tests in `tests/unit/` need no device. Run them with `make unit-test` after
 
 The other tests use [cijoe](https://github.com/refenv/cijoe) (v0.9.51) and require a block device formatted with XFS. The test workflow creates a loopback device, formats it, populates files, then runs pytest tests in `cijoe/tests/`.
 
+The C programs in `tests/integration/` are installed as `xal_test_*` and run by the cijoe tests against the mounted device.
+
 ```bash
 make test               # alias for test-using-loop
 make test-using-loop    # loopback device (default, used in CI)
@@ -100,6 +102,7 @@ Inodes and extents are stored in separate contiguous pools backed by `mmap`. Poo
 - `tools/test_shm_version.c` -- test that `xal_from_shm()` refuses a mismatched state version
 - `tools/test_mark_dirty.c` -- test that `xal_mark_dirty()` makes xal-server re-index
 - `tools/xal-server/` -- daemon publishing xal indexes over POSIX shared memory (optional, needs tomlc17)
+- `tests/integration/test_inotify.c` -- test of the FIEMAP backend's inotify watcher
 - `tests/test.h` -- `TEST_ASSERT()` and `TEST_RUN()` for the C tests
 - `tests/unit/test_pool.c` -- unit tests for `xal_pool`
 - `tests/unit/test_xal.c` -- unit tests for the core functions in `src/xal.c`
