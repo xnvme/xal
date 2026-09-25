@@ -11,7 +11,6 @@ doc: |
   * Extracts a block-map / extents for all files in the file-system
   * Run tests
   * Mount the file-system again, and run the tests that need it mounted
-    (tests/test_fiemap_index.py)
   * Unmount the file-system, leaving the device as the workflow found it
 
   zram: https://docs.kernel.org/admin-guide/blockdev/zram.html
@@ -57,7 +56,7 @@ steps:
   with:
     run_local: true
     random_order: false
-    args: "tests/test_fiemap_index.py"
+    args: "tests/test_fiemap_index.py tests/test_inotify.py"
 
 - name: umount
   uses: core.cmdrunner
