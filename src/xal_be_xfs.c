@@ -1756,6 +1756,11 @@ xal_be_xfs_index(struct xal *xal)
 
 	atomic_store(xal->index_state, XAL_STATE_INDEXING);
 
+	/* Bracket the rewrite with the sequence lock, as the FIEMAP backend does: the pools are
+	 * cleared and refilled in place below, and a secondary mapping them has no other way to
+	 * learn its extents were replaced. See xal_get_extents() for the protocol. */
+	atomic_fetch_add(xal->seq_lock, 1);
+
 	xal_pool_clear(&xal->inodes);
 	xal_pool_clear(&xal->extents);
 
@@ -1778,6 +1783,7 @@ xal_be_xfs_index(struct xal *xal)
 	}
 
 exit:
+	atomic_fetch_add(xal->seq_lock, 1);
 	xal_mark_index_done(xal, err);
 
 	return err;

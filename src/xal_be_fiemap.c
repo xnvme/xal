@@ -16,19 +16,13 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <xal.h>
 #include <xal_be_fiemap.h>
 #include <xal_be_fiemap_inotify.h>
 #include <xal_odf.h>
-#include <xal_bpf_events.h>
-#include <xal_bpf.h>
 
 KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
-
-/** Basename prefix of the per-session reflink shadow directory: <mnt>/.xal_snapshot.<pid> */
-#define XAL_SNAPSHOT_PREFIX ".xal_snapshot."
 
 /** Max length of a "<dir>/<entry>" path assembled under the shadow directory. */
 #define XAL_SNAPSHOT_ENTRY_MAXLEN (XAL_PATH_MAXLEN + 64)
@@ -36,11 +30,10 @@ KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
 /**
  * Reflink-snapshot state (XAL_WATCHMODE_REFLINK_SNAPSHOT).
  *
- * At index time every regular file the walk visits is reflink-cloned into a private shadow
- * directory (the walk is scoped by be->subtree, so the subtree restriction is applied there, not
- * here). The clone's on-disk inode keeps the shared blocks allocated for the whole xal session --
- * so the extents captured from it stay valid even as the origin is rewritten (writes to the origin
- * divert to new blocks via CoW). The clones are removed at xal_close().
+ * Every regular file the walk visits is cloned into a private shadow directory; the clone's inode
+ * keeps the shared blocks allocated, so extents captured from it survive writes to the origin
+ * (which divert via CoW). Clones live until the next xal_index() or xal_close(), whichever comes
+ * first. See enum xal_watchmode for what that guarantees a reader.
  */
 struct xal_reflink {
 	char *dir;        ///< Shadow directory holding the clones: <mountpoint>/.xal_snapshot.<pid>
@@ -184,15 +177,12 @@ reflink_dir_prepare(struct xal_reflink *rl)
 /**
  * Reflink-clone the file open at @origin_fd into the shadow directory.
  *
- * FICLONE itself flushes the origin's dirty pages (write-and-wait under the iolock) and resolves
- * delayed allocation to real blocks before sharing, so no explicit fsync is needed for the clone's
- * FIEMAP to see true physical extents. The clone is left on-disk (its inode pins the shared
- * blocks); the fd returned in @clone_fd is only needed to FIEMAP the clone and may be closed
- * afterwards without freeing blocks.
+ * FICLONE write-and-waits the origin under the iolock and resolves delalloc to real blocks before
+ * sharing, so no explicit fsync is needed for the clone's FIEMAP to see true physical extents.
+ * The clone is left on-disk (its inode pins the blocks); @clone_fd is only needed to FIEMAP it.
  *
- * One clone per inode instance: a hardlink to the same inode reuses the existing clone rather
- * than cloning the same data again. Clones are named "<ino>.<gen>" so a recycled inode number
- * (a different instance) never collides with an earlier one.
+ * One clone per inode instance, named "<ino>.<gen>": a hardlink reuses the existing clone, and the
+ * generation keeps a recycled inode number from colliding with an earlier instance.
  */
 static int
 reflink_clone_file(struct xal_be_fiemap *be, const char *path, int origin_fd, int *clone_fd)
@@ -300,36 +290,22 @@ xal_be_fiemap_close(struct xal *xal)
 	be = (struct xal_be_fiemap *)&xal->be;
 
 	if (xal->procrole == XAL_PROCROLE_SECONDARY) {
-		XAL_DEBUG("INFO: secondary; watcher, snapshot and freeze belong to the primary");
-	} else if (be->inotify) {
-		xal_be_fiemap_inotify_close(be->inotify);
-	} else if (be->reflink) {
-		if (be->reflink->dir_created) {
-			reflink_dir_purge(be->reflink->dir);
-		}
-		free(be->reflink->dir);
-		free(be->reflink);
+		XAL_DEBUG("INFO: secondary; watcher and snapshot belong to the primary");
 	} else {
-#ifdef XAL_BPF_ENABLED
-		if (be->bpf) {
-			xal_be_fiemap_bpf_close(be->bpf);
+		// The watch thread is joined first: purging the clones unlinks paths the mountpoint
+		// watch reports on.
+		if (be->inotify) {
+			xal_be_fiemap_inotify_close(be->inotify);
+			free(be->inotify);
+			be->inotify = NULL;
 		}
-#endif /* XAL_BPF_ENABLED */
-
-		int fd = open(be->mountpoint, O_RDONLY | O_DIRECTORY);
-
-		if (fd >= 0) {
-			int err = ioctl(fd, FITHAW, 0);
-			if (err == 0) {
-				XAL_DEBUG("INFO: thawed filesystem");
-			} else if (errno == EINVAL) {
-				XAL_DEBUG("INFO: FITHAW returned EINVAL; already thawed?");
-			} else {
-				XAL_DEBUG("ERROR: could not thaw filesystem; errno(%d)", errno);
+		if (be->reflink) {
+			if (be->reflink->dir_created) {
+				reflink_dir_purge(be->reflink->dir);
 			}
-			close(fd);
-		} else {
-			XAL_DEBUG("FAILED: could not open() fs mountpoint for thaw");
+			free(be->reflink->dir);
+			free(be->reflink);
+			be->reflink = NULL;
 		}
 	}
 
@@ -426,6 +402,14 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		return -EINVAL;
 	}
 
+	// Accept only known modes: anything unrecognised must not fall through to the watch setup
+	// below and be treated as "some mode".
+	if ((opts->watch_mode != XAL_WATCHMODE_NONE) &&
+	    (opts->watch_mode != XAL_WATCHMODE_REFLINK_SNAPSHOT)) {
+		XAL_DEBUG("FAILED: watch_mode(%d) is not a valid xal_watchmode", opts->watch_mode);
+		return -EINVAL;
+	}
+
 	cand = calloc(1, sizeof(*cand));
 	if (!cand) {
 		XAL_DEBUG("FAILED: calloc(); errno(%d)", errno);
@@ -497,7 +481,8 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	}
 
 	if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
-		// reflink-snapshot mode: no inotify watch, no freeze; clones pin the blocks
+		// The clones pin the blocks; the watch below only reports that the filesystem has
+		// moved on since.
 		size_t dlen;
 
 		be->reflink = calloc(1, sizeof(struct xal_reflink));
@@ -523,7 +508,9 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 
 		XAL_DEBUG("INFO: reflink-snapshot mode; clones under dir(%s), subtree(%s)",
 			  be->reflink->dir, be->subtree ? be->subtree : "(whole tree)");
-	} else if (opts->watch_mode) {
+	}
+
+	if (opts->watch_mode) {
 		be->inotify = calloc(1, sizeof(struct xal_inotify));
 		if (!be->inotify) {
 			XAL_DEBUG("FAILED: calloc(); errno(%d)", errno);
@@ -536,68 +523,6 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_init()");
 			goto failed;
 		}
-	} else {
-#ifdef XAL_BPF_ENABLED
-		// since fs is mounted without a watch mode, freeze it
-		// + init bpf thread to listen to unfreeze events
-		struct xal_bpf *bpf = calloc(1, sizeof(struct xal_bpf));
-		if (!bpf) {
-			XAL_DEBUG("FAILED: calloc(); errno(%d)", errno);
-			err = -errno;
-			goto failed;
-		}
-
-		// glibc major()/minor() and the kernel's MKDEV(20,12) split on s_dev
-		// produce the same numeric values, so userspace and BPF can compare
-		// directly. If a kernel changes that split, the BPF filter will start
-		// dropping every event as "ignored" -- check skel->bss->stats.ignored_events.
-		bpf->ctx.dev_major = major(sb.st_dev);
-		bpf->ctx.dev_minor = minor(sb.st_dev);
-		bpf->ctx.fs_block_size = sb.st_blksize;
-
-		err = xal_be_fiemap_bpf_init(bpf);
-		if (err) {
-			XAL_DEBUG("FAILED: xal_be_fiemap_bpf_init()");
-			goto failed;
-		}
-
-		be->bpf = bpf;
-#endif /* XAL_BPF_ENABLED */
-
-		int fd = open(mountpoint, O_RDONLY | O_DIRECTORY);
-
-		if (fd < 0) {
-			XAL_DEBUG("FAILED: open(); errno(%d)", errno);
-			err = -errno;
-			goto failed;
-		}
-
-		// when ioctl returns, fs is fully frozen
-		err = ioctl(fd, FIFREEZE, 0);
-		if (err == 0) {
-			XAL_DEBUG("INFO: froze filesystem");
-		} else if (errno == EBUSY) {
-			XAL_DEBUG("INFO: FIFREEZE returned EBUSY; already frozen?");
-		} else {
-			close(fd);
-			XAL_DEBUG("FAILED: could not freeze filesystem; errno(%d)", errno);
-			goto failed;
-		}
-		close(fd);
-
-#ifdef XAL_BPF_ENABLED
-		err = xal_be_fiemap_bpf_rb_init(cand, be->bpf);
-		if (err) {
-			XAL_DEBUG("FAILED: xal_be_fiemap_bpf_rb_init(); err(%d)", err);
-			goto failed;
-		}
-
-		err = xal_bpf_start_poll_thread(cand);
-		if (err) {
-			XAL_DEBUG("FAILED: xal_bpf_start_poll_thread(); err(%d)", err);
-			goto failed;
-		}
-#endif /* XAL_BPF_ENABLED */
 	}
 
 	// Scope the pre-count to the subtree when set: the index walks only that subtree
@@ -814,12 +739,8 @@ exit:
 }
 
 /*
- * Take a pointer to a fiemap struct with an fm_extents array of size 0.
- * The ioctl sets the "mapped_extents" integer to the amount of extents
- * existing in the file descriptor, so we reallocate the fiemap to be of
- * the right size, and then run the ioctl again with "fm_extent_count"
- * set to the right size too, such that all the extents are read into the
- * struct.
+ * Two ioctls: the first, with fm_extent_count 0, reports how many extents the file has; the
+ * fiemap is then reallocated to fit and the ioctl re-run to read them.
  */
 static int
 read_fiemap(int fd, struct fiemap **fiemap_ptr)
@@ -1038,15 +959,16 @@ xal_be_fiemap_index(struct xal *xal)
 	xal_pool_clear(&xal->extents);
 
 	if (be->inotify) {
-		err = xal_be_fiemap_inotify_drain(be->inotify);
-		if (err) {
-			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_drain(); err(%d)", err);
-			goto exit;
-		}
-
+		/* Clear before draining: inotify_rm_watch() queues an IN_IGNORED per watch. */
 		err = xal_be_fiemap_inotify_clear_inode_map(be->inotify);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_clear_inode_map(); err(%d)", err);
+			goto exit;
+		}
+
+		err = xal_be_fiemap_inotify_drain(be->inotify);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_drain(); err(%d)", err);
 			goto exit;
 		}
 	}
@@ -1117,7 +1039,13 @@ build_hashmap_walk(struct xal *xal, struct xal_inode *inode)
 
 	if (xal_inode_is_dir(inode)) {
 		for (uint32_t i = 0; i < inode->content.dentries.count; i++) {
-			struct xal_inode *child = xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
+			struct xal_inode *child =
+				xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
+
+			if (!child) {
+				XAL_DEBUG("FAILED: dentry index out of range");
+				return -ESTALE;
+			}
 
 			err = build_hashmap_walk(xal, child);
 			if (err) {
@@ -1133,6 +1061,7 @@ int
 xal_build_lookup_hashmap(struct xal *xal)
 {
 	struct xal_be_fiemap *be;
+	struct xal_inode *root;
 	int err;
 
 	if (!xal) {
@@ -1151,6 +1080,12 @@ xal_build_lookup_hashmap(struct xal *xal)
 		return -ESTALE;
 	}
 
+	root = xal_inode_at(xal, xal->root_idx);
+	if (!root) {
+		XAL_DEBUG("FAILED: root index out of range; index rewritten under us");
+		return -ESTALE;
+	}
+
 	if (be->path_inode_map) {
 		kh_destroy(path_to_inode, be->path_inode_map);
 	}
@@ -1161,7 +1096,7 @@ xal_build_lookup_hashmap(struct xal *xal)
 		return -ENOMEM;
 	}
 
-	err = build_hashmap_walk(xal, xal_inode_at(xal, xal->root_idx));
+	err = build_hashmap_walk(xal, root);
 	if (err) {
 		XAL_DEBUG("FAILED: build_hashmap_walk(); err(%d)", err);
 		kh_destroy(path_to_inode, be->path_inode_map);
@@ -1210,8 +1145,14 @@ xal_be_fiemap_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 		// Match the basepath to the indexed tree root: when a subtree is set the walk is rerooted
 		// at it, so strip the subtree prefix (not the mountpoint) from the query.
 		char *basepath = be->subtree ? be->subtree : be->mountpoint;
+		struct xal_inode *root;
 
-		err = search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, basepath, inode);
+		root = xal_inode_at(xal, xal->root_idx);
+		if (!root) {
+			XAL_DEBUG("FAILED: root index out of range; index rewritten under us");
+			return -ESTALE;
+		}
+		err = search_by_traversal(xal, root, path, basepath, inode);
 		if (err) {
 			XAL_DEBUG("FAILED: search_by_traversal(%s); err(%d)", path, err);
 			return err;

@@ -24,11 +24,6 @@ Dependencies:
 - `xnvme` >= 0.7.0 -- must be installed and visible to `pkg-config`
 - `librt`
 
-And optionally,
-- `libbpf`, `libelf`, `zlib` (for the BPF event listener)
-- `clang`, `llvm`, and `bpftool` (to compile BPF objects and generate skeletons)
-- A kernel exposing BTF at `/sys/kernel/btf/vmlinux` (i.e. built with `CONFIG_DEBUG_INFO_BTF=y`)
-
 The default `make` target runs clean, configure, build, and install in one
 shot:
 
@@ -63,33 +58,60 @@ integration and supports path-based inode and extent lookup via `xal_get_inode()
 
 #### File system changes
 
-Using inotify and BPF, **xal** monitors changes to the indexed files if a
-fitting watchmode is set.
-
 **`XAL_WATCHMODE_NONE`**
-: No inotify setup. The xal struct will never be marked dirty automatically.
+: Nothing is watched and nothing is pinned. The extents describe the filesystem
+  as it was at `xal_index()` time, and a write by any other process can
+  invalidate them. For a caller that owns the filesystem; `xal_mark_dirty()` is
+  available to signal a change the caller made itself.
 
-**`XAL_WATCHMODE_DIRTY_DETECTION`**
-: Any filesystem event marks the xal struct as dirty. The caller detects
-  this with `xal_is_dirty()` and must re-call `xal_index()` to rebuild
-  the tree.
+**`XAL_WATCHMODE_REFLINK_SNAPSHOT`**
+: Every regular file, optionally restricted to `opts.subtree`, is
+  reflink-cloned into a private immutable shadow directory at `xal_index()`
+  time, and the extents are captured from the clones. The clones hold the
+  blocks for as long as the index that produced them stands, so no foreign
+  write can move a block out from under a published extent. A re-index
+  re-snapshots and releases them; clones are removed at `xal_close()`.
 
-**`XAL_WATCHMODE_EXTENT_UPDATE`**
-: File-modification events (`IN_MODIFY`, `IN_CLOSE_WRITE`) trigger an
-  automatic in-place extent refresh for the affected file via a new FIEMAP
-  call, coordinated with `seq_lock` so concurrent readers remain safe.
-  Structural changes (`IN_CREATE`, `IN_DELETE`, `IN_MOVE`) still mark
-  the struct dirty, as they require a full re-index.
+: An inotify watch runs alongside the clones, at whole-index granularity. The
+  dirty flag means something different here than for a mode with nothing
+  pinned: `xal_is_dirty()` becoming true says *the filesystem has moved on*,
+  not *your extents may be garbage*. See `enum xal_watchmode` in `libxal.h`
+  for what the pinning does and does not guarantee, and `xal_get_extents()`
+  for the sequence-lock loop a reader owes it.
 
-When opened with a `watch_mode` other than `XAL_WATCHMODE_NONE`, an
-inotify watch is registered for every directory during `xal_index()`.
-A background thread started with `xal_watch_filesystem()` then processes
-events. The watched event mask per directory is: `IN_CREATE`,
-`IN_DELETE`, `IN_MOVE`, `IN_MODIFY`, `IN_ATTRIB`,
-`IN_CLOSE_WRITE`, and `IN_UNMOUNT`.
+##### What the watch can and cannot see
 
-BPF is used to monitor changes made by the filesystem itself. However, this module
-is only loaded if the dependencies are present.
+The watch is one inotify watch per directory, placed during the index walk,
+with the mask `IN_CREATE | IN_DELETE | IN_MOVE | IN_MODIFY | IN_ATTRIB |
+IN_CLOSE_WRITE | IN_MOVE_SELF | IN_DELETE_SELF | IN_UNMOUNT`. One watch per
+directory means a large tree needs a correspondingly large
+`fs.inotify.max_user_watches` -- it is a per-UID budget shared with every other
+inotify user on the system, and a watch that cannot be placed fails the index.
+
+The walk places them whether or not `xal_watch_filesystem()` is ever called, so
+a caller that wants only the pinned extents pays the same budget as one that
+wants the dirty flag, and can be refused an index over a signal it never reads.
+Size `fs.inotify.max_user_watches` for the tree even when nothing will watch it.
+
+Two changes are invisible to it, and no mask fixes either:
+
+- **A writer holding a mapping.** `mmap()` writes produce no event until
+  `munmap()` or the last close, so a long-lived mapped writer is unreported for
+  as long as it holds the mapping.
+- **A hardlink written through a path outside the indexed tree.** inotify
+  reports to the watch on the parent directory used for the operation, so a
+  write through a second link elsewhere notifies that directory, not ours.
+
+Neither can make an extent invalid -- the clone still pins the blocks -- so the
+cost is staleness that goes unreported, not a bad read. Both would be covered
+by a filesystem-wide `fanotify` mark, which needs `CAP_SYS_ADMIN`.
+
+`XAL_WATCHMODE_DIRTY_DETECTION` and `XAL_WATCHMODE_EXTENT_UPDATE` used to sit
+between these two. Both were inotify-based attempts at keeping extents usable
+under foreign writes, and both reported a change after the fact, which narrows a
+race rather than closing it; `XAL_WATCHMODE_REFLINK_SNAPSHOT` pins the blocks
+instead. They are gone, and the enum was renumbered rather than left with a hole
+in it -- anything outside these two values is `-EINVAL`.
 
 #### File lookup modes
 
