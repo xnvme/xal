@@ -587,6 +587,40 @@ dinodes_get(struct xal *xal, uint64_t ino, void **dinode)
 	return 0;
 }
 
+/*
+ * Symlinks and special files are not indexed; an unknown type is read from the inode's mode.
+ * Returns 1 to skip the entry, 0 to index it, or a negative errno, -EINVAL for a type XFS does
+ * not define.
+ */
+static int
+_should_skip(struct xal *xal, struct xal_inode *dentry)
+{
+	struct xal_odf_dinode *dinode;
+	uint16_t mode;
+	int err;
+
+	if (dentry->ftype == XAL_ODF_DIR3_FT_UNKNOWN) {
+		err = dinodes_get(xal, dentry->ino, (void **)&dinode);
+		if (err) {
+			return err;
+		}
+		mode = be16toh(dinode->di_mode);
+		if (S_ISDIR(mode)) {
+			dentry->ftype = XAL_ODF_DIR3_FT_DIR;
+		} else if (S_ISREG(mode)) {
+			dentry->ftype = XAL_ODF_DIR3_FT_REG_FILE;
+		}
+	}
+
+	if (dentry->ftype >= XAL_ODF_DIR3_FT_MAX) {
+		XAL_DEBUG("FAILED: invalid ftype(%u) for ino(0x%" PRIx64 ")", dentry->ftype,
+			  dentry->ino);
+		return -EINVAL;
+	}
+
+	return dentry->ftype != XAL_ODF_DIR3_FT_DIR && dentry->ftype != XAL_ODF_DIR3_FT_REG_FILE;
+}
+
 /**
  * Retrieve and decode the allocation group headers for a given allocation group
  *
@@ -914,6 +948,13 @@ btree_lblock_decode_leaf_records(struct xal *xal, void *buf, struct xal_inode *s
 				}
 				if ((dentry.namelen == 2) && (dentry.name[0] == '.') &&
 				    (dentry.name[1] == '.')) {
+					continue;
+				}
+				err = _should_skip(xal, &dentry);
+				if (err < 0) {
+					return err;
+				}
+				if (err) {
 					continue;
 				}
 
@@ -1301,25 +1342,21 @@ process_dinode_dir_local(struct xal *xal, struct xal_odf_dinode *dinode, struct 
 
 	cursor += i8count ? 8 : 4; ///< Advance past parent inode number
 
-	self->content.dentries.count = count;
-
-	err = xal_pool_claim_inodes(&xal->inodes, count, &self->content.dentries.inodes_idx);
-	if (err) {
-		XAL_DEBUG("FAILED: xal_pool_claim_inodes(); err(%d)", err);
-		return err;
-	}
+	/* Slots are claimed as entries are kept, so the range starts at the next free one. */
+	self->content.dentries.inodes_idx = xal->inodes.free;
 
 	/** DECODE: namelen[1], offset[2], name[namelen], ftype[1], ino[4] | ino[8] */
 	for (int i = 0; i < count; ++i) {
-		struct xal_inode *dentry = xal_inode_at(xal, self->content.dentries.inodes_idx + i);
+		struct xal_inode dentry = {0};
+		uint32_t slot;
 
-		dentry->namelen = *cursor;
+		dentry.namelen = *cursor;
 		cursor += 1 + 2; ///< Advance past 'namelen' and 'offset[2]'
 
-		memcpy(dentry->name, cursor, dentry->namelen);
-		cursor += dentry->namelen; ///< Advance past 'name'
+		memcpy(dentry.name, cursor, dentry.namelen);
+		cursor += dentry.namelen; ///< Advance past 'name'
 
-		dentry->ftype = *cursor;
+		dentry.ftype = *cursor;
 		cursor += 1; ///< Advance past 'ftype'
 
 		/**
@@ -1327,12 +1364,28 @@ process_dinode_dir_local(struct xal *xal, struct xal_odf_dinode *dinode, struct 
 		 * including the parent above -- is 64-bit; otherwise all are 32-bit.
 		 */
 		if (i8count) {
-			dentry->ino = be64toh(*(uint64_t *)cursor);
+			dentry.ino = be64toh(*(uint64_t *)cursor);
 			cursor += 8; ///< Advance past 64-bit inode number
 		} else {
-			dentry->ino = be32toh(*(uint32_t *)cursor);
+			dentry.ino = be32toh(*(uint32_t *)cursor);
 			cursor += 4; ///< Advance past 32-bit inode number
 		}
+
+		err = _should_skip(xal, &dentry);
+		if (err < 0) {
+			return err;
+		}
+		if (err) {
+			continue;
+		}
+
+		err = xal_pool_claim_inodes(&xal->inodes, 1, &slot);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_pool_claim_inodes(); err(%d)", err);
+			return err;
+		}
+		*xal_inode_at(xal, slot) = dentry;
+		self->content.dentries.count += 1;
 	}
 
 	{
@@ -1340,10 +1393,11 @@ process_dinode_dir_local(struct xal *xal, struct xal_odf_dinode *dinode, struct 
 		struct xal_inode *all_inodes = (struct xal_inode *)xal->inodes.memory;
 		struct xal_inode *these_inodes = &all_inodes[self->content.dentries.inodes_idx];
 
-		qsort(these_inodes, count, sizeof(struct xal_inode), compare_inode);
+		qsort(these_inodes, self->content.dentries.count, sizeof(struct xal_inode),
+		      compare_inode);
 	}
 
-	for (int i = 0; i < count; ++i) {
+	for (uint32_t i = 0; i < self->content.dentries.count; ++i) {
 		struct xal_inode *dentry = xal_inode_at(xal, self->content.dentries.inodes_idx + i);
 
 		dentry->parent_idx = xal_inode_idx(xal, self);
@@ -1492,6 +1546,13 @@ process_dinode_dir_extents_dblock(struct xal *xal, uint64_t fsbno, struct xal_in
 			continue;
 		}
 		if ((dentry.namelen == 2) && (dentry.name[0] == '.') && (dentry.name[1] == '.')) {
+			continue;
+		}
+		err = _should_skip(xal, &dentry);
+		if (err < 0) {
+			return err;
+		}
+		if (err) {
 			continue;
 		}
 
