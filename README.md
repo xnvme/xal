@@ -168,3 +168,9 @@ structure containing the parsed contents of directory extents via
 
 Instead of reading directory blocks from disk, one can use the, in-memory,
 decoded file system tree rooted at `xal->root`.
+
+Only directories and regular files are indexed. Symlinks and special files
+(FIFOs, sockets, device nodes) are skipped, and the FIEMAP backend skips
+anything mounted inside the tree, detected with `STATX_ATTR_MOUNT_ROOT` (Linux
+5.8 or later). A mountpoint or `opts.subtree` that is itself a symlink is
+rejected with `-ENOTDIR`.
