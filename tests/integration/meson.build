@@ -3,6 +3,7 @@ test_sources = [
   'test_inotify.c',
   # A reader of an xal-server index, for the cijoe test of re-indexing in XAL_WATCHMODE_NONE.
   'test_mark_dirty.c',
+  'test_shm.c',
   'test_shm_version.c',
 ]
 
