@@ -205,6 +205,23 @@ def provoke_odf_iabt_lvl1(args: Namespace, cijoe: Cijoe) -> int:
     )
 
 
+def provoke_deep_path(args: Namespace, cijoe: Cijoe) -> int:
+    """
+    Create files nested deep enough that their absolute path exceeds 255 bytes
+
+    A 'struct xal_inode' stores the leaf name of an entry, not the path leading to it, so a
+    tree this deep is indexed like any other. It is a regression guard: the FIEMAP backend
+    used to assemble the absolute path into the name field, and refused the entire index
+    once a path did not fit.
+    """
+
+    dir = args.mountpoint
+    for cur in range(1, 7):
+        dir = dir / f"deeply-nested-directory-with-a-descriptive-name-{cur}"
+
+    return create_directory_with_urandom_content(args, cijoe, dir, 2, "4K")
+
+
 def populate(args, cijoe) -> int:
     """Explicitly create different files and folders to provoke all ODF cases"""
 
@@ -230,6 +247,9 @@ def populate(args, cijoe) -> int:
         return err
 
     if err := provoke_odf_file_fmt_btree(args, cijoe):
+        return err
+
+    if err := provoke_deep_path(args, cijoe):
         return err
 
     return 0

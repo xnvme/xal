@@ -194,6 +194,7 @@ publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoi
 	 * clears it once there is something to attach to. */
 	atomic_store(&state->index_state, XAL_STATE_DIRTY);
 
+	state->version = XAL_SHM_VERSION;
 	state->type = be;
 	state->sb = xal->sb;
 	strncpy(state->mountpoint, mountpoint, XAL_PATH_MAXLEN - 1);
@@ -207,6 +208,8 @@ publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoi
 			state->subtree[XAL_PATH_MAXLEN - 1] = '\0';
 		}
 	}
+
+	atomic_store_explicit(&state->magic, XAL_SHM_MAGIC, memory_order_release);
 
 	return 0;
 }
@@ -391,12 +394,19 @@ xal_index(struct xal *xal)
 }
 
 static int
-_walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_data, int depth)
+_walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_data, int depth,
+	  int exp_seqlock)
 {
-	int err;
+	int act_seqlock, err;
 
 	if (xal_is_dirty(xal)) {
 		XAL_DEBUG("FAILED: File system has changed");
+		return -ESTALE;
+	}
+
+	act_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock != act_seqlock) {
+		XAL_DEBUG("FAILED: Seqlock has changed");
 		return -ESTALE;
 	}
 
@@ -412,7 +422,7 @@ _walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_da
 		struct xal_inode *inodes = xal_inode_at(xal, inode->content.dentries.inodes_idx);
 
 		for (uint32_t i = 0; i < inode->content.dentries.count; ++i) {
-			err = _walk(xal, &inodes[i], cb_func, cb_data, depth + 1);
+			err = _walk(xal, &inodes[i], cb_func, cb_data, depth + 1, exp_seqlock);
 			if (err) {
 				return err;
 			}
@@ -433,12 +443,28 @@ _walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_da
 int
 xal_walk(struct xal *xal, struct xal_inode *inode, xal_walk_cb cb_func, void *cb_data)
 {
+	int exp_seqlock, act_seqlock, err;
+
 	if (xal_is_dirty(xal)) {
 		XAL_DEBUG("FAILED: File system has changed");
 		return -ESTALE;
 	}
 
-	return _walk(xal, inode, cb_func, cb_data, 0);
+	exp_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock & 1) {
+		XAL_DEBUG("FAILED: Seqlock is odd; the pools are being rewritten");
+		return -ESTALE;
+	}
+
+	err = _walk(xal, inode, cb_func, cb_data, 0, exp_seqlock);
+
+	act_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock != act_seqlock) {
+		XAL_DEBUG("FAILED: Seqlock has changed");
+		return -ESTALE;
+	}
+
+	return err;
 }
 
 struct xal_inode *
@@ -503,6 +529,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 	char shm_name_inodes[128], shm_name_extents[128], shm_name_state[128];
 	size_t inodes_size, extents_size;
 	void *inodes_mem, *extents_mem;
+	uint64_t magic;
 	int shm_fd = -1, err;
 
 	xal = calloc(1, sizeof(*xal));
@@ -524,6 +551,26 @@ xal_from_shm(const char *shm_name, struct xal **out)
 		goto failed;
 	}
 
+	err = fstat(shm_fd, &st);
+	if (err) {
+		err = -errno;
+		fprintf(stderr, "Failed: fstat(state); err(%d)\n", err);
+		goto failed;
+	}
+
+	if (!st.st_size) {
+		err = -EAGAIN;
+		fprintf(stderr, "Failed: the shared region is empty, primary "
+				"has likely not finished publishing it; err(%d)\n", err);
+		goto failed;
+	}
+	if (st.st_size != (off_t)sizeof(struct xal_shared_state)) {
+		fprintf(stderr, "Failed: state region is %jd bytes, expected %zu\n",
+			(intmax_t)st.st_size, sizeof(struct xal_shared_state));
+		err = -EPROTO;
+		goto failed;
+	}
+
 	state = mmap(NULL, sizeof(struct xal_shared_state), PROT_READ | PROT_WRITE, MAP_SHARED,
 		     shm_fd, 0);
 	close(shm_fd);
@@ -533,6 +580,22 @@ xal_from_shm(const char *shm_name, struct xal **out)
 		err = -errno;
 		fprintf(stderr, "Failed: mmap(state); err(%d)\n", err);
 		goto failed;
+	}
+
+	magic = atomic_load_explicit(&state->magic, memory_order_acquire);
+	if (!magic) {
+		err = -EAGAIN;
+		fprintf(stderr, "Failed: Primary has not finished publishing "
+			"the shared state; err(%d)\n", err);
+		goto unmap_state;
+	}
+	if ((magic != XAL_SHM_MAGIC) || (state->version != XAL_SHM_VERSION)) {
+		fprintf(stderr, "Failed: state magic(%llx) version(%u), expected magic(%llx) "
+				"version(%u)\n",
+			(unsigned long long)magic, state->version,
+			(unsigned long long)XAL_SHM_MAGIC, XAL_SHM_VERSION);
+		err = -EPROTO;
+		goto unmap_state;
 	}
 
 	xal->state = state;
@@ -649,15 +712,126 @@ failed:
 	return err;
 }
 
+/**
+ * Write the path of the given inode into 'buf', appending to the 'nbytes' bytes already there
+ */
+static int
+inode_path_assemble(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_nbytes,
+		    size_t *nbytes)
+{
+	uint32_t inode_idx = xal_inode_idx(xal, inode);
+	int err;
+
+	if (inode->parent_idx == XAL_POOL_IDX_NONE) {
+		return 0;
+	}
+
+	if (inode_idx <= inode->parent_idx) {
+		XAL_DEBUG("FAILED: malformed parent index(inode_idx <= parent_idx)");
+		return -EINVAL;
+	}
+
+	err = inode_path_assemble(xal, xal_inode_at(xal, inode->parent_idx), buf, buf_nbytes, nbytes);
+	if (err) {
+		return err;
+	}
+
+	if ((*nbytes + 1 + inode->namelen + 1) > buf_nbytes) {
+		XAL_DEBUG("FAILED: path does not fit in buf_nbytes(%zu)", buf_nbytes);
+		return -ENAMETOOLONG;
+	}
+
+	buf[*nbytes] = '/';
+	memcpy(buf + *nbytes + 1, inode->name, inode->namelen);
+	*nbytes += 1 + inode->namelen;
+	buf[*nbytes] = '\0';
+
+	return 0;
+}
+
+int
+xal_inode_path(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_nbytes)
+{
+	struct xal_backend_base *be;
+	const char *basepath = "";
+	size_t nbytes;
+	int exp_seqlock, act_seqlock, err;
+
+	if (!xal || !inode || !buf || !buf_nbytes) {
+		XAL_DEBUG("FAILED: invalid arguments");
+		return -EINVAL;
+	}
+
+	if (xal_is_dirty(xal)) {
+		XAL_DEBUG("FAILED: File system has changed");
+		return -ESTALE;
+	}
+
+	exp_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock & 1) {
+		XAL_DEBUG("FAILED: Seqlock is odd; the pools are being rewritten");
+		return -ESTALE;
+	}
+
+	be = (struct xal_backend_base *)&xal->be;
+	if (be->type == XAL_BACKEND_FIEMAP) {
+		struct xal_be_fiemap *fiemap_be = (struct xal_be_fiemap *)&xal->be;
+
+		basepath = fiemap_be->subtree ? fiemap_be->subtree : fiemap_be->mountpoint;
+	}
+
+	nbytes = strlen(basepath);
+	if ((nbytes + 1) > buf_nbytes) {
+		XAL_DEBUG("FAILED: basepath does not fit in buf_nbytes(%zu)", buf_nbytes);
+		return -ENAMETOOLONG;
+	}
+	memcpy(buf, basepath, nbytes + 1);
+
+	err = inode_path_assemble(xal, inode, buf, buf_nbytes, &nbytes);
+	if (err) {
+		XAL_DEBUG("FAILED: inode_path_assemble(); err(%d)", err);
+		return err;
+	}
+
+	/* The root of a tree without a basepath, that is, the XFS backend */
+	if (!nbytes) {
+		if (buf_nbytes < 2) {
+			return -ENAMETOOLONG;
+		}
+		buf[nbytes++] = '/';
+		buf[nbytes] = '\0';
+	}
+
+	act_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock != act_seqlock) {
+		XAL_DEBUG("FAILED: Seqlock has changed");
+		buf[0] = '\0';
+		return -ESTALE;
+	}
+
+	return (int)nbytes;
+}
+
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode)
 {
+	uint32_t inode_idx;
 	int wrtn = 0;
 
-	if (!inode) {
+	if (!xal || !inode) {
 		return wrtn;
 	}
+
+	if (xal_is_dirty(xal)) {
+		return wrtn;
+	}
+
 	if (inode->parent_idx == XAL_POOL_IDX_NONE) {
+		return wrtn;
+	}
+
+	inode_idx = xal_inode_idx(xal, inode);
+	if (inode_idx <= inode->parent_idx) {
 		return wrtn;
 	}
 
@@ -724,21 +898,14 @@ compare_name_to_inode(const void *key, const void *elem)
 	const char *component = key;
 	const struct xal_inode *inode = elem;
 
-	const char *basename = strrchr(inode->name, '/');
-	if (basename) {
-		basename++;
-	} else {
-		basename = inode->name;
-	}
-
-	return strcmp(component, basename);
+	return strcmp(component, inode->name);
 }
 
 int
 search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode)
 {
 	struct xal_inode *search, *found = NULL;
-	char *search_begin, *search_end;
+	char *search_begin, *search_end, *remainder;
 	size_t basepath_len;
 
 	basepath_len = strlen(basepath);
@@ -748,20 +915,34 @@ search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *b
 		return -EINVAL;
 	}
 
-	if (strlen(path) <= basepath_len + 1) {
-		XAL_DEBUG("FAILED: Not a valid path(%s); path too short; must be absolute path to entry in mountpoint(%s)",
-			path, basepath);
+	if (!path[0]) {
+		XAL_DEBUG("FAILED: no path given");
 		return -EINVAL;
 	}
 
 	if (strncmp(path, basepath, basepath_len) != 0) {
-		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; must be absolute path to entry in mountpoint(%s)",
+		XAL_DEBUG("FAILED: Not a valid path(%s); not a subpath; "
+			"must be absolute path to entry in mountpoint(%s)",
 			path, basepath);
 		return -EINVAL;
 	}
 
+	remainder = path + basepath_len;
+
+	/* The indexed root itself; the basepath alone for FIEMAP, "/" for XFS */
+	if (!remainder[0] || strcmp(remainder, "/") == 0) {
+		*inode = root;
+		return 0;
+	}
+
+	if (remainder[0] != '/') {
+		XAL_DEBUG("FAILED: Not a valid path(%s); basepath(%s) not followed by '/'",
+			  path, basepath);
+		return -EINVAL;
+	}
+
 	search = root;
-	search_begin = path + basepath_len + 1;
+	search_begin = remainder + 1;
 	search_end = strchr(search_begin, '/');
 
 	while (!found) {
@@ -807,10 +988,10 @@ int
 xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 {
 	struct xal_backend_base *be;
-	int err = 0;
+	int exp_seqlock, act_seqlock, err = 0;
 
-	if (!xal) {
-		XAL_DEBUG("FAILED: no xal given");
+	if (!xal || !inode) {
+		XAL_DEBUG("FAILED: no xal and/or inode given");
 		return -EINVAL;
 	}
 
@@ -824,6 +1005,12 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 		return -ESTALE;
 	}
 
+	exp_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock & 1) {
+		XAL_DEBUG("FAILED: Seqlock is odd; the pools are being rewritten");
+		return -ESTALE;
+	}
+
 	if (xal->root_idx == XAL_POOL_IDX_NONE) {
 		XAL_DEBUG("FAILED: Missing call to xal_index()");
 		return -EINVAL;
@@ -833,12 +1020,21 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 
 	switch (be->type) {
 	case XAL_BACKEND_XFS:
-		return search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, "", inode);
+		err = search_by_traversal(xal, xal_inode_at(xal, xal->root_idx), path, "", inode);
+		break;
 	case XAL_BACKEND_FIEMAP:
-		return xal_be_fiemap_get_inode(xal, path, inode);
+		err = xal_be_fiemap_get_inode(xal, path, inode);
+		break;
 	default:
 		XAL_DEBUG("Failed: Unknown backend type(%d)", be->type);
 		err = -EINVAL;
+	}
+
+	act_seqlock = xal_get_seq_lock(xal);
+	if (exp_seqlock != act_seqlock) {
+		XAL_DEBUG("FAILED: Seqlock has changed");
+		*inode = NULL;
+		return -ESTALE;
 	}
 
 	return err;
