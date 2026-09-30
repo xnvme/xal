@@ -56,7 +56,7 @@ steps:
   with:
     run_local: true
     random_order: false
-    args: "tests/test_fiemap_index.py tests/test_inotify.py"
+    args: "tests/test_fiemap_index.py tests/test_inotify.py tests/test_shm.py::test_shm_primary_secondary"
 
 - name: umount
   uses: core.cmdrunner
