@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <xal.h>
+#include <xal_be_fiemap.h>
 #include <xal_odf.h>
 
 #include "test.h"
@@ -214,6 +215,249 @@ test_walk_dirty_returns_estale(void)
 	return 0;
 }
 
+static void
+set_entry(struct xal_inode *inode, const char *name, uint8_t ftype, uint32_t parent_idx)
+{
+	inode->ftype = ftype;
+	inode->namelen = strlen(name);
+	memcpy(inode->name, name, inode->namelen + 1);
+	inode->parent_idx = parent_idx;
+}
+
+// Index 0 is the root, 1 is the directory "dir" and 2 is the file "file" inside it
+static void
+build_path_tree(struct xal *xal)
+{
+	set_entry(xal_inode_at(xal, 0), "", XAL_ODF_DIR3_FT_DIR, XAL_POOL_IDX_NONE);
+	set_entry(xal_inode_at(xal, 1), "dir", XAL_ODF_DIR3_FT_DIR, 0);
+	set_entry(xal_inode_at(xal, 2), "file", XAL_ODF_DIR3_FT_REG_FILE, 1);
+}
+
+static int
+test_inode_path_xfs(void)
+{
+	struct xal_sb sb = {0};
+	char buf[64];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_XFS);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, sizeof(buf));
+	TEST_ASSERT(err == (int)strlen("/dir/file"));
+	TEST_ASSERT(strcmp(buf, "/dir/file") == 0);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 1), buf, sizeof(buf));
+	TEST_ASSERT(err == (int)strlen("/dir"));
+	TEST_ASSERT(strcmp(buf, "/dir") == 0);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_xfs_root(void)
+{
+	struct xal_sb sb = {0};
+	char buf[64];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_XFS);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 0), buf, sizeof(buf));
+	TEST_ASSERT(err == 1);
+	TEST_ASSERT(strcmp(buf, "/") == 0);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 0), buf, 1);
+	TEST_ASSERT(err == -ENAMETOOLONG);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_fiemap_mountpoint(void)
+{
+	struct xal_sb sb = {0};
+	struct xal_be_fiemap *be;
+	char buf[64];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_FIEMAP);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	be = (struct xal_be_fiemap *)&xal->be;
+	be->mountpoint = "/mnt/xal";
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, sizeof(buf));
+	TEST_ASSERT(err == (int)strlen("/mnt/xal/dir/file"));
+	TEST_ASSERT(strcmp(buf, "/mnt/xal/dir/file") == 0);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 0), buf, sizeof(buf));
+	TEST_ASSERT(err == (int)strlen("/mnt/xal"));
+	TEST_ASSERT(strcmp(buf, "/mnt/xal") == 0);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_fiemap_subtree(void)
+{
+	struct xal_sb sb = {0};
+	struct xal_be_fiemap *be;
+	char buf[64];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_FIEMAP);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	be = (struct xal_be_fiemap *)&xal->be;
+	be->mountpoint = "/mnt/xal";
+	be->subtree = "/mnt/xal/sub";
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, sizeof(buf));
+	TEST_ASSERT(err == (int)strlen("/mnt/xal/sub/dir/file"));
+	TEST_ASSERT(strcmp(buf, "/mnt/xal/sub/dir/file") == 0);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_buffer_boundary(void)
+{
+	struct xal_sb sb = {0};
+	char buf[64];
+	size_t nbytes;
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_XFS);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	nbytes = strlen("/dir/file") + 1;
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, nbytes);
+	TEST_ASSERT(err == (int)nbytes - 1);
+	TEST_ASSERT(strcmp(buf, "/dir/file") == 0);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, nbytes - 1);
+	TEST_ASSERT(err == -ENAMETOOLONG);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_basepath_too_long(void)
+{
+	struct xal_sb sb = {0};
+	struct xal_be_fiemap *be;
+	char buf[8];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_FIEMAP);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	be = (struct xal_be_fiemap *)&xal->be;
+	be->mountpoint = "/mnt/xal";
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 0), buf, sizeof(buf));
+	TEST_ASSERT(err == -ENAMETOOLONG);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_invalid_args(void)
+{
+	struct xal_sb sb = {0};
+	char buf[64];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_XFS);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	err = xal_inode_path(NULL, xal_inode_at(xal, 2), buf, sizeof(buf));
+	TEST_ASSERT(err == -EINVAL);
+
+	err = xal_inode_path(xal, NULL, buf, sizeof(buf));
+	TEST_ASSERT(err == -EINVAL);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), NULL, sizeof(buf));
+	TEST_ASSERT(err == -EINVAL);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, 0);
+	TEST_ASSERT(err == -EINVAL);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_malformed_parent(void)
+{
+	struct xal_sb sb = {0};
+	char buf[64];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_XFS);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	// A parent at or after its child would loop; it must be refused
+	xal_inode_at(xal, 1)->parent_idx = 2;
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, sizeof(buf));
+	TEST_ASSERT(err == -ESTALE);
+
+	xal_inode_at(xal, 1)->parent_idx = 1;
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 1), buf, sizeof(buf));
+	TEST_ASSERT(err == -ESTALE);
+
+	xal_close(xal);
+	return 0;
+}
+
+static int
+test_inode_path_dirty_returns_estale(void)
+{
+	struct xal_sb sb = {0};
+	char buf[64];
+	struct xal *xal;
+	int err;
+
+	xal = make_xal(&sb, XAL_BACKEND_XFS);
+	TEST_ASSERT(xal != NULL);
+	build_path_tree(xal);
+
+	xal_mark_dirty(xal);
+
+	err = xal_inode_path(xal, xal_inode_at(xal, 2), buf, sizeof(buf));
+	TEST_ASSERT(err == -ESTALE);
+
+	xal_close(xal);
+	return 0;
+}
+
 int
 main(void)
 {
@@ -227,6 +471,15 @@ main(void)
 	TEST_RUN(test_extent_in_lba);
 	TEST_RUN(test_extent_in_lba_null);
 	TEST_RUN(test_walk_dirty_returns_estale);
+	TEST_RUN(test_inode_path_xfs);
+	TEST_RUN(test_inode_path_xfs_root);
+	TEST_RUN(test_inode_path_fiemap_mountpoint);
+	TEST_RUN(test_inode_path_fiemap_subtree);
+	TEST_RUN(test_inode_path_buffer_boundary);
+	TEST_RUN(test_inode_path_basepath_too_long);
+	TEST_RUN(test_inode_path_invalid_args);
+	TEST_RUN(test_inode_path_malformed_parent);
+	TEST_RUN(test_inode_path_dirty_returns_estale);
 
 	return failures;
 }
