@@ -5,6 +5,7 @@ DEEP_DIR = "/".join(
     f"deeply-nested-directory-with-a-descriptive-name-{cur}" for cur in range(1, 7)
 )
 DEEP_FILE = f"{DEEP_DIR}/file-rand-4K-0-2.bin"
+LONG_NAME_FILE = "should-be-dir-fmt_btree-no_attr_fork/long-name-000000-" + "a" * 238
 
 
 def lookup(cijoe, path: str, args: str = ""):
@@ -25,6 +26,12 @@ def test_deep_path_xfs(cijoe):
     """
 
     assert not lookup(cijoe, f"/{DEEP_FILE}", "--backend xfs")
+
+
+def test_long_name_xfs(cijoe):
+    """Resolve a file whose name is the maximum 255 bytes on the XFS backend"""
+
+    assert not lookup(cijoe, f"/{LONG_NAME_FILE}", "--backend xfs")
 
 
 def test_root_xfs(cijoe):

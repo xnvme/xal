@@ -13,7 +13,7 @@ import pytest
 
 from test_bmap import compare_to_xfs_bmap
 from test_index import compare_to_find
-from test_lookup import DEEP_FILE, lookup
+from test_lookup import DEEP_FILE, LONG_NAME_FILE, lookup
 
 
 def _artifacts(cijoe) -> Path:
@@ -69,6 +69,24 @@ def test_deep_path_hashmap(cijoe):
 
     assert not lookup(
         cijoe, f"{mountpoint}/{DEEP_FILE}", "--backend fiemap --file_lookup_map"
+    )
+
+
+def test_long_name_traverse(cijoe):
+    """Resolve a file whose name is the maximum 255 bytes by walking the tree"""
+
+    _, mountpoint = _require_mount(cijoe)
+
+    assert not lookup(cijoe, f"{mountpoint}/{LONG_NAME_FILE}", "--backend fiemap")
+
+
+def test_long_name_hashmap(cijoe):
+    """The same lookup, answered from the path-to-inode map"""
+
+    _, mountpoint = _require_mount(cijoe)
+
+    assert not lookup(
+        cijoe, f"{mountpoint}/{LONG_NAME_FILE}", "--backend fiemap --file_lookup_map"
     )
 
 
