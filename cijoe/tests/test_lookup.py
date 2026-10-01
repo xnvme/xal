@@ -50,3 +50,16 @@ def test_missing_xfs(cijoe):
     """A path to an entry that does not exist is not found"""
 
     assert lookup(cijoe, "/does-not-exist", "--backend xfs") == errno.ENOENT
+
+
+def test_lookup_after_reindex(cijoe, require_mount):
+    """
+    Run the C integration test for lookups across a re-index against the XFS mountpoint: it
+    changes a directory tree between two calls to xal_index() and checks that lookups, by
+    traversal and through the hash map, follow the change.
+    """
+
+    mountpoint = cijoe.getconf("xal.mountpoint", None)
+
+    err, state = cijoe.run(f"xal_test_lookup_map {mountpoint}")
+    assert not err, state.output()

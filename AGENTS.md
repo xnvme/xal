@@ -101,6 +101,7 @@ Inodes and extents are stored in separate contiguous pools backed by `mmap`. Poo
 - `tools/xal_lease_hold.c` -- test aid holding a file's extents under a read lease
 - `tools/xal-server/` -- daemon publishing xal indexes over POSIX shared memory (optional, needs tomlc17)
 - `tests/integration/test_inotify.c` -- test of the FIEMAP backend's inotify watcher
+- `tests/integration/test_lookup_map.c` -- test that path lookups follow a re-index
 - `tests/integration/test_mark_dirty.c` -- test that `xal_mark_dirty()` makes xal-server re-index
 - `tests/integration/test_shm.c` -- test of sharing an index between processes with `xal_from_shm()`
 - `tests/integration/test_shm_version.c` -- test that `xal_from_shm()` refuses a mismatched state version
