@@ -1,6 +1,6 @@
+#define _GNU_SOURCE
 #include <asm-generic/errno.h>
 #include <libxnvme.h>
-#define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -353,6 +353,33 @@ _is_directory_member(char *name)
 	return !is_self && !is_parent;
 }
 
+/* A trailing slash makes lstat() follow a symlink, and doubles the slash in indexed paths. */
+static void
+_strip_trailing_slashes(char *path)
+{
+	size_t len = strlen(path);
+
+	while (len > 1 && path[len - 1] == '/') {
+		path[--len] = '\0';
+	}
+}
+
+/* A mountpoint or subtree must be a directory, not a symlink to one. */
+static int
+_check_root(const char *path, struct stat *sb)
+{
+	if (lstat(path, sb)) {
+		XAL_DEBUG("FAILED: lstat(%s); errno(%d)", path, errno);
+		return -errno;
+	}
+	if (!S_ISDIR(sb->st_mode)) {
+		XAL_DEBUG("FAILED: %s is not a directory", path);
+		return -ENOTDIR;
+	}
+
+	return 0;
+}
+
 static int
 retrieve_total_entries(char *path)
 {
@@ -450,10 +477,14 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	}
 
 	strcpy(be->mountpoint, mountpoint);
-	err = stat(be->mountpoint, &sb);
+	_strip_trailing_slashes(be->mountpoint);
+	if (!strcmp(be->mountpoint, "/")) {
+		XAL_DEBUG("FAILED: mountpoint(/) is not supported");
+		err = -EINVAL;
+		goto failed;
+	}
+	err = _check_root(be->mountpoint, &sb);
 	if (err) {
-		XAL_DEBUG("FAILED: stat(%s); errno(%d)", be->mountpoint, errno);
-		err = -errno;
 		goto failed;
 	}
 
@@ -461,7 +492,7 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	// FIEMAP backend (any watch mode); in reflink-snapshot mode it also bounds what gets cloned,
 	// since only the walked files are reflinked.
 	if (opts->subtree && strlen(opts->subtree)) {
-		size_t mplen = strlen(mountpoint);
+		size_t mplen = strlen(be->mountpoint);
 		struct stat st;
 
 		be->subtree = strdup(opts->subtree);
@@ -470,28 +501,23 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 			err = -errno;
 			goto failed;
 		}
+		_strip_trailing_slashes(be->subtree);
 
 		// Matched against absolute, mountpoint-rooted paths, so it must be an absolute path at or
 		// under the mountpoint. Reject a malformed one (relative, typo, wrong mount) rather than
 		// silently indexing nothing.
-		if (strncmp(be->subtree, mountpoint, mplen) != 0 ||
+		if (strncmp(be->subtree, be->mountpoint, mplen) != 0 ||
 		    (be->subtree[mplen] != '\0' && be->subtree[mplen] != '/')) {
 			XAL_DEBUG("FAILED: subtree(%s) is not under mountpoint(%s)", be->subtree,
-				  mountpoint);
+				  be->mountpoint);
 			err = -EINVAL;
 			goto failed;
 		}
 
 		// Require the subtree to exist and be a directory now, so a typo'd or missing path is
 		// rejected here with a clear error instead of surfacing later during the walk.
-		if (stat(be->subtree, &st) != 0) {
-			XAL_DEBUG("FAILED: stat(subtree=%s); errno(%d)", be->subtree, errno);
-			err = -errno;
-			goto failed;
-		}
-		if (!S_ISDIR(st.st_mode)) {
-			XAL_DEBUG("FAILED: subtree(%s) is not a directory", be->subtree);
-			err = -ENOTDIR;
+		err = _check_root(be->subtree, &st);
+		if (err) {
 			goto failed;
 		}
 	}
@@ -507,19 +533,19 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 			goto failed;
 		}
 
-		dlen = strlen(mountpoint) + 32;
+		dlen = strlen(be->mountpoint) + 32;
 		be->reflink->dir = malloc(dlen);
 		if (!be->reflink->dir) {
 			XAL_DEBUG("FAILED: malloc(); errno(%d)", errno);
 			err = -errno;
 			goto failed;
 		}
-		snprintf(be->reflink->dir, dlen, "%s/" XAL_SNAPSHOT_PREFIX "%d", mountpoint,
+		snprintf(be->reflink->dir, dlen, "%s/" XAL_SNAPSHOT_PREFIX "%d", be->mountpoint,
 			 (int)getpid());
 
 		// Sweep pre-existing shadow dirs now so orphans are cleaned even if the caller never
 		// indexes; xal_index() sweeps again (and resets dir_created) before each (re)snapshot.
-		reflink_sweep_orphans(mountpoint);
+		reflink_sweep_orphans(be->mountpoint);
 
 		XAL_DEBUG("INFO: reflink-snapshot mode; clones under dir(%s), subtree(%s)",
 			  be->reflink->dir, be->subtree ? be->subtree : "(whole tree)");
@@ -778,13 +804,17 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 		dentry->namelen = dentry_pathlen;
 		dentry->parent_idx = xal_inode_idx(xal, inode);
 
-		inode->content.dentries.count += 1;
-
 		err = process_ino_fiemap(xal, dentry_path, dentry);
 		if (err) {
 			XAL_DEBUG("FAILED: process_ino_fiemap(); with path(%s)", dentry_path);
 			goto exit;
 		}
+		if (!dentry->ftype) {
+			memset(dentry, 0, sizeof(*dentry));
+			continue;
+		}
+
+		inode->content.dentries.count += 1;
 	}
 
 	if (be->path_inode_map) {
@@ -963,14 +993,15 @@ failed:
 static int
 process_ino_fiemap(struct xal *xal, char *path, struct xal_inode *self)
 {
-	struct stat sb;
+	struct statx stx;
 	int err;
 
 	if (!path) {
 		return -EINVAL;
 	}
 
-	err = stat(path, &sb);
+	err = statx(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+		    STATX_TYPE | STATX_INO | STATX_SIZE, &stx);
 	if (err) {
 		if (errno == ENOENT) {
 			XAL_DEBUG("FAILED: stat(%s); No such file or directory, try again", path);
@@ -981,18 +1012,23 @@ process_ino_fiemap(struct xal *xal, char *path, struct xal_inode *self)
 	}
 
 	if (!self->ftype) {
-		if S_ISDIR(sb.st_mode) {
+		/* Symlinks, special files and mount points are not indexed; ftype stays 0. */
+		if (stx.stx_attributes & STATX_ATTR_MOUNT_ROOT) {
+			XAL_DEBUG("INFO: mount point, skipping");
+			return 0;
+		}
+		if (S_ISDIR(stx.stx_mode)) {
 			self->ftype = XAL_ODF_DIR3_FT_DIR;
-		} else if (S_ISREG(sb.st_mode)) {
+		} else if (S_ISREG(stx.stx_mode)) {
 			self->ftype = XAL_ODF_DIR3_FT_REG_FILE;
 		} else {
-			XAL_DEBUG("FAILED: unsupported ftype");
-			return -EINVAL;
+			XAL_DEBUG("INFO: unsupported ftype, skipping");
+			return 0;
 		}
 	}
 
-	self->ino = sb.st_ino;
-	self->size = sb.st_size;
+	self->ino = stx.stx_ino;
+	self->size = stx.stx_size;
 
 	switch(self->ftype) {
 		case XAL_ODF_DIR3_FT_DIR:
@@ -1022,6 +1058,7 @@ xal_be_fiemap_index(struct xal *xal)
 {
 	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
 	struct xal_inode *root;
+	struct stat sb;
 	int err;
 
 	if (!strlen(be->mountpoint)) {
@@ -1033,6 +1070,17 @@ xal_be_fiemap_index(struct xal *xal)
 
 	XAL_DEBUG("INFO: waiting for xal lock");
 	atomic_fetch_add(xal->seq_lock, 1);
+
+	err = _check_root(be->mountpoint, &sb);
+	if (err) {
+		goto exit;
+	}
+	if (be->subtree) {
+		err = _check_root(be->subtree, &sb);
+		if (err) {
+			goto exit;
+		}
+	}
 
 	xal_pool_clear(&xal->inodes);
 	xal_pool_clear(&xal->extents);

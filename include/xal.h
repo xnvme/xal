@@ -81,6 +81,9 @@ struct xal {
 int
 search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode);
 
+int
+compare_name_to_inode(const void *key, const void *elem);
+
 void
 xal_mark_index_done(struct xal *xal, int err);
 

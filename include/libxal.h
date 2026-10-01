@@ -260,6 +260,9 @@ xal_pp(struct xal *xal);
  * opts->be is in/out: left zero it is filled in with the detected backend and stays set. A caller
  * reusing one struct xal_opts across devices must clear it between calls.
  *
+ * With XAL_BACKEND_FIEMAP, the mountpoint and opts->subtree must be directories, not symlinks to
+ * one; -ENOTDIR is returned otherwise. A mountpoint of / is rejected with -EINVAL.
+ *
  * @param dev Pointer to xnvme device handled as retrieved with xnvme_dev_open()
  * @param xal Pointer
  * @param opts Pointer to options, see xal_opts
@@ -306,6 +309,10 @@ xal_dinodes_retrieve(struct xal *xal);
  *
  * Assumes that you have retrieved all the inodes from disk via xal_dinodes_retrieve() if opened with
  * backend XAL_BACKEND_XFS.
+ *
+ * Only directories and regular files are indexed; symlinks and special files are skipped, and so
+ * is anything mounted inside the tree with XAL_BACKEND_FIEMAP. That backend also checks the
+ * mountpoint and opts->subtree again, as xal_open() does.
  * 
  * When called, any index created from previous calls to xal_index() are cleared.
  * 
@@ -377,11 +384,8 @@ xal_stop_watching_filesystem(struct xal *xal);
 /**
  * Recursively walk the given directory
  *
- * Invoking the given cb_func with cb_data for each directory-entry in the traversal. Do note that
- * not all inode-types are supported, e.g. symlinks are not represented only the types:
- *
- *   * Directory
- *   * Regular file
+ * Invoking the given cb_func with cb_data for each directory-entry in the traversal. Only
+ * directories and regular files are indexed, see xal_index().
  *
  * The index is checked before the traversal starts: -ESTALE is returned when it has been marked
  * dirty, which for a handle from xal_from_shm() includes the primary having closed. The check is

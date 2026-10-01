@@ -203,6 +203,8 @@ publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoi
 	if (be == XAL_BACKEND_FIEMAP) {
 		struct xal_be_fiemap *fiemap_be = (struct xal_be_fiemap *)&xal->be;
 
+		/* The backend's copy, which has its trailing slashes stripped. */
+		strncpy(state->mountpoint, fiemap_be->mountpoint, XAL_PATH_MAXLEN - 1);
 		if (fiemap_be->subtree) {
 			strncpy(state->subtree, fiemap_be->subtree, XAL_PATH_MAXLEN - 1);
 			state->subtree[XAL_PATH_MAXLEN - 1] = '\0';
@@ -756,7 +758,7 @@ xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_e
 	return 0;
 }
 
-static int
+int
 compare_name_to_inode(const void *key, const void *elem)
 {
 	const char *component = key;

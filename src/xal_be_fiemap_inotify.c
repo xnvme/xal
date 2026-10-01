@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <khash.h>
 #include <libxal.h>
+#include <limits.h>
 #include <linux/fs.h>
 #include <poll.h>
 #include <pthread.h>
@@ -219,6 +220,59 @@ inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
 	return wrtn;
 }
 
+/*
+ * Find the directory an event's watch is on, and the indexed entry the event names there. Sets
+ * @inode to NULL when that directory holds no such entry. Returns -ENOENT when the watch is not one
+ * of ours.
+ */
+static int
+event_entry(struct xal *xal, struct xal_inotify *inotify, struct inotify_event *event,
+	    struct xal_inode **dir, struct xal_inode **inode)
+{
+	kh_wd_to_inode_t *inode_map = inotify->inode_map;
+	khiter_t iter;
+
+	iter = kh_get(wd_to_inode, inode_map, event->wd);
+	if (iter == kh_end(inode_map)) {
+		XAL_DEBUG("FAILED: kh_get(%d) for event with name(%s)", event->wd, event->name);
+		return -ENOENT;
+	}
+
+	*dir = kh_val(inode_map, iter);
+	if (!xal_inode_is_dir(*dir)) {
+		XAL_DEBUG("FAILED: found inode(%s) is not a directory", (*dir)->name);
+		return -ENOENT;
+	}
+
+	*inode = bsearch(event->name, xal_inode_at(xal, (*dir)->content.dentries.inodes_idx),
+			 (*dir)->content.dentries.count, sizeof(**inode), compare_name_to_inode);
+
+	return 0;
+}
+
+/*
+ * Whether the entry an event names in @dir is a symlink or special file, which the index skips.
+ * An entry lstat() cannot read counts as neither.
+ */
+static bool
+event_on_skipped_entry(struct xal *xal, struct xal_inode *dir, struct inotify_event *event)
+{
+	struct xal_be_fiemap *be = (struct xal_be_fiemap *)&xal->be;
+	char path[PATH_MAX];
+	struct stat st;
+	int len;
+
+	/* The walk root's name is empty. */
+	len = snprintf(path, sizeof(path), "%s/%s",
+		       dir->namelen ? dir->name : (be->subtree ? be->subtree : be->mountpoint),
+		       event->name);
+	if (len < 0 || len >= (int)sizeof(path) || lstat(path, &st)) {
+		return false;
+	}
+
+	return !S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode);
+}
+
 /**
  * Drain the inotify queue, applying incrementally what can be applied
  *
@@ -228,20 +282,14 @@ inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
 static int
 check_events(struct xal *xal, struct xal_inotify *inotify)
 {
-	struct xal_inode *dir_inode, *inode;
-	kh_wd_to_inode_t *inode_map;
+	struct xal_inode *dir, *inode;
 	char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
-	char path[XAL_PATH_MAXLEN];
-	khiter_t iter;
 	ssize_t len, i;
 	struct stat st;
 	int err;
 
-	inode_map = inotify->inode_map;
-
 	len = read(inotify->fd, buf, sizeof buf);
 	while (len > 0) {
-		int wd;
 		i = 0;
 
 		while (i < len) {
@@ -249,10 +297,21 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 			__attribute__((unused)) char mask_pp[128];
 
 			inode = NULL;  // reset the pointer to the inode
-			wd = event->wd;
 
 			XAL_DEBUG_FCALL(inotify_event_mask_pp, event->mask, mask_pp, 128);
-			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1], wd, event->name)
+			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1],
+				  event->wd, event->name)
+
+			/* The index skips symlinks and special files, so an event naming an
+			 * entry it lacks is ignored when lstat() finds one of those. Any other
+			 * entry it lacks is new to the index, or gone, and re-indexes. */
+			if (event->len && !event_entry(xal, inotify, event, &dir, &inode) &&
+			    !inode && event_on_skipped_entry(xal, dir, event)) {
+				XAL_DEBUG("INFO: ignoring event on skipped entry; name(%s)",
+					  event->name);
+				i += sizeof(struct inotify_event) + event->len;
+				continue;
+			}
 
 			if (inotify->watch_mode == XAL_WATCHMODE_DIRTY_DETECTION) {
 				XAL_DEBUG("INFO: File system has changed;");
@@ -267,52 +326,18 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 			}
 
 			if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE)) {
-				iter = kh_get(wd_to_inode, inode_map, wd);
-				if (iter == kh_end(inode_map)) {
-					XAL_DEBUG("FAILED: kh_get(%d) for event with name(%s)", wd, event->name);
-					return XAL_INOTIFY_REINDEX;
-				}
-
-				XAL_DEBUG("INFO: found watch descriptor(%d) for event with name(%s)", wd, event->name);
-
-				dir_inode = kh_val(inode_map, iter);
-				if (!xal_inode_is_dir(dir_inode)) {
-					XAL_DEBUG("FAILED: found inode(%s) is not a directory", dir_inode->name);
-					return XAL_INOTIFY_REINDEX;
-				}
-
-				if (dir_inode->namelen + 1 + strlen(event->name) + 1 > sizeof(path)) {
-					XAL_DEBUG("FAILED: event(%s) full path too long(%zu)",
-							event->name, dir_inode->namelen + 1 + strlen(event->name) + 1);
-					return XAL_INOTIFY_REINDEX;
-				}
-				memcpy(path, dir_inode->name, dir_inode->namelen);
-				path[dir_inode->namelen] = '/';
-				memcpy(path + dir_inode->namelen + 1, event->name, strlen(event->name));
-				path[dir_inode->namelen + 1 + strlen(event->name)] = '\0';
-
-				XAL_DEBUG("INFO: got full path of event: %s", path);
-				atomic_fetch_add(xal->seq_lock, 1);
-
-				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
-					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
-
-					if (strcmp(child->name, path) == 0) {
-						inode = child;
-						break;
-					}
-				}
-
+				/* Not in the index: a new entry, or a watch that is not ours. */
 				if (!inode) {
-					XAL_DEBUG("FAILED: could not find child with name(%s)", event->name);
-					err = XAL_INOTIFY_REINDEX;
-					goto failed_with_lock;
+					return XAL_INOTIFY_REINDEX;
 				}
+
+				atomic_fetch_add(xal->seq_lock, 1);
 
 				XAL_DEBUG("INFO: reprocessing inode:");
 				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
 
-				err = xal_be_fiemap_process_inode_file(xal, path, inode);
+				/* This backend keeps the entry's whole path in its name. */
+				err = xal_be_fiemap_process_inode_file(xal, inode->name, inode);
 				if (err) {
 					XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_file(); err(%d)", err);
 					err = XAL_INOTIFY_REINDEX;
@@ -320,9 +345,10 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				}
 
 				// Update to new file size
-				err = stat(path, &st);
+				err = stat(inode->name, &st);
 				if (err) {
-					XAL_DEBUG("FAILED: stat(%s) errno(%d) while getting new file size", path, errno);
+					XAL_DEBUG("FAILED: stat(%s) for new file size; errno(%d)",
+						  inode->name, errno);
 					err = XAL_INOTIFY_REINDEX;
 					goto failed_with_lock;
 				}

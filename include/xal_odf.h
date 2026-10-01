@@ -63,6 +63,7 @@ typedef struct {
 
 #define XAL_ODF_IBT_CRC_MAGIC 0x49414233 ///< 'IAB3'
 
+#define XAL_ODF_DIR3_FT_UNKNOWN 0
 #define XAL_ODF_DIR3_FT_REG_FILE 1
 #define XAL_ODF_DIR3_FT_DIR 2
 
