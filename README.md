@@ -81,6 +81,9 @@ fitting watchmode is set.
   Structural changes (`IN_CREATE`, `IN_DELETE`, `IN_MOVE`) still mark
   the struct dirty, as they require a full re-index.
 
+Either mode ignores events on entries the index skips: symlinks, special
+files and mount points.
+
 When opened with a `watch_mode` other than `XAL_WATCHMODE_NONE`, an
 inotify watch is registered for every directory during `xal_index()`.
 A background thread started with `xal_watch_filesystem()` then processes

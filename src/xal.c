@@ -845,7 +845,7 @@ xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_e
 	return 0;
 }
 
-static int
+int
 compare_name_to_inode(const void *key, const void *elem)
 {
 	const char *component = key;
