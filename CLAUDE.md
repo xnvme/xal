@@ -62,7 +62,7 @@ Backend is auto-detected: if the device is mounted, FIEMAP is used; otherwise XF
 
 ### Memory pools (`struct xal_pool`)
 
-Inodes and extents are stored in separate contiguous pools backed by `mmap`. Pools reserve a large virtual range with `PROT_NONE` and commit pages lazily via `mprotect`. Elements are accessed by index (`xal_inode_at(xal, idx)`), never by pointer, so indices stay stable. Pools can optionally use POSIX shared memory (`shm_name` option) for cross-process sharing via `xal_from_pools()`.
+Inodes and extents are stored in separate contiguous pools backed by `mmap`. Pools reserve a large virtual range with `PROT_NONE` and commit pages lazily via `mprotect`. Elements are accessed by index (`xal_inode_at(xal, idx)`), never by pointer, so indices stay stable. Pools can optionally use POSIX shared memory (`shm_name` option) for cross-process sharing via `xal_from_shm()`.
 
 ### Key internal types
 

@@ -6,7 +6,7 @@ backed by a large over-committed ``mmap`` region.
 The pool reserves a virtual address range upfront sized for the maximum
 expected number of elements, but only commits physical pages in chunks as
 elements are claimed (via ``mprotect``). This keeps the array contiguous in
-memory — ``xal_inode_at(xal, idx)`` is a plain pointer offset — and means
+memory — ``xal_inode_at(xal, idx)`` is a bounds-checked pointer offset — and means
 elements never move, so pool indices remain stable across all insertions.
 
 ## Lazy growth (anonymous mode)

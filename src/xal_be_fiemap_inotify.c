@@ -1,10 +1,8 @@
 #include <asm-generic/errno.h>
 #define _GNU_SOURCE
 #include <errno.h>
-#include <fcntl.h>
 #include <khash.h>
 #include <libxal.h>
-#include <linux/fs.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -26,25 +24,56 @@
  * dirty flag is noticed, so it trades those two against the wakeup rate. */
 #define XAL_INOTIFY_POLL_TIMEOUT_MS 100
 
-KHASH_MAP_INIT_INT64(wd_to_inode, struct xal_inode *);
-
-int
-xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *inode);
+KHASH_SET_INIT_INT(wd_set);
 
 static bool
 xal_be_fiemap_inotify_is_live(struct xal_inotify *inotify)
 {
-	int flag;
+	return !(atomic_load(&inotify->flag) & XAL_BE_FIEMAP_INOTIFY_EXITED);
+}
 
-	flag = atomic_load(&inotify->flag);
+/**
+ * Take ownership of the watch thread for joining, under the lifecycle lock
+ *
+ * Returns 0 and fills @tid for the caller that takes JOINABLE, so two reapers cannot both join the
+ * same thread; -EINVAL when there is no thread to join; -EDEADLK when called from the watch thread
+ * itself, refused before storing stop so a failed call does not stop the watcher. The join is left
+ * to the caller and happens outside the lock: a stop can take up to XAL_INOTIFY_POLL_TIMEOUT_MS to
+ * be noticed.
+ *
+ * EXITED is left alone: a claimed thread must read as live until it has exited, or a start racing
+ * the join would reset the stop it has yet to see.
+ */
+static int
+inotify_claim_join(struct xal_inotify *inotify, bool request_stop, pthread_t *tid)
+{
+	int err = -EINVAL;
 
-	return (flag & XAL_BE_FIEMAP_INOTIFY_JOINABLE) && !(flag & XAL_BE_FIEMAP_INOTIFY_EXITED);
+	pthread_mutex_lock(&inotify->lifecycle);
+
+	if (atomic_load(&inotify->flag) & XAL_BE_FIEMAP_INOTIFY_JOINABLE) {
+		if (pthread_equal(pthread_self(), inotify->watch_thread_id)) {
+			err = -EDEADLK;
+		} else {
+			atomic_fetch_and(&inotify->flag, ~XAL_BE_FIEMAP_INOTIFY_JOINABLE);
+			if (request_stop) {
+				atomic_store(&inotify->stop, true);
+			}
+			*tid = inotify->watch_thread_id;
+			err = 0;
+		}
+	}
+
+	pthread_mutex_unlock(&inotify->lifecycle);
+
+	return err;
 }
 
 void
 xal_be_fiemap_inotify_close(struct xal_inotify *inotify)
 {
-	kh_wd_to_inode_t *inode_map;
+	kh_wd_set_t *inode_map;
+	pthread_t tid;
 
 	if (!inotify) {
 		XAL_DEBUG("SKIPPED: No xal_inotify given")
@@ -53,38 +82,51 @@ xal_be_fiemap_inotify_close(struct xal_inotify *inotify)
 
 	inode_map = inotify->inode_map;
 
-	/* Reap whether it was told to stop or exited on its own. JOINABLE says watch_thread_id
-	 * names a thread nobody has joined yet, which is what makes the join safe; EXITED only says
-	 * whether it will return at once. A thread that has already exited ignores the stop, so
-	 * requesting it here costs nothing and is what keeps a live one from being joined
-	 * forever. */
-	if (atomic_load(&inotify->flag) & XAL_BE_FIEMAP_INOTIFY_JOINABLE) {
-		atomic_store(&inotify->stop, true);
-		pthread_join(inotify->watch_thread_id, NULL);
-		atomic_fetch_and(&inotify->flag,
-				 ~(XAL_BE_FIEMAP_INOTIFY_JOINABLE | XAL_BE_FIEMAP_INOTIFY_EXITED));
+	/* Reap whether it was told to stop or exited on its own: a thread that has already exited
+	 * ignores the stop. */
+	if (!inotify_claim_join(inotify, true, &tid)) {
+		pthread_join(tid, NULL);
 	}
 
 	if (inode_map) {
-		kh_destroy(wd_to_inode, inode_map);
+		kh_destroy(wd_set, inode_map);
 	}
 
-	if (inotify->fd) {
+	/* fd 0 is a valid descriptor, so -1 is what means "none". */
+	if (inotify->fd >= 0) {
 		close(inotify->fd);
+		inotify->fd = -1;
 	}
+
+	/* Last, and only safe because the caller owns the handle by now: this frees the lock that
+	 * guards the start path. A concurrent xal_watch_filesystem() is a use-after-free of the
+	 * handle -- bad usage. */
+	pthread_mutex_destroy(&inotify->lifecycle);
 }
 
 int
 xal_be_fiemap_inotify_init(struct xal_inotify *inotify, enum xal_watchmode watch_mode)
 {
+	int err;
+
 	if (!inotify) {
 		XAL_DEBUG("FAILED: No xal_inotify given");
 		return -EINVAL;
 	}
 
 	inotify->watch_mode = watch_mode;
-	atomic_init(&inotify->flag, 0);
+	/* No thread exists yet, which is what EXITED says. */
+	atomic_init(&inotify->flag, XAL_BE_FIEMAP_INOTIFY_EXITED);
 	atomic_init(&inotify->stop, false);
+
+	/* calloc() leaves this 0, which names stdin rather than nothing. */
+	inotify->fd = -1;
+
+	err = pthread_mutex_init(&inotify->lifecycle, NULL);
+	if (err) {
+		XAL_DEBUG("FAILED: pthread_mutex_init(); err(%d)", err);
+		return -err;
+	}
 
 	if (!inotify->watch_mode) {
 		XAL_DEBUG("INFO: Skipping xal_be_fiemap_inotify_init(), watch mode none given");
@@ -93,17 +135,28 @@ xal_be_fiemap_inotify_init(struct xal_inotify *inotify, enum xal_watchmode watch
 
 	inotify->fd = inotify_init1(IN_NONBLOCK);
 	if (inotify->fd < 0) {
-		XAL_DEBUG("FAILED: inotify_init1(); errno(%d)", errno);
-		return -errno;
+		err = -errno;
+		XAL_DEBUG("FAILED: inotify_init1(); err(%d)", err);
+		goto failed;
 	}
 
-	inotify->inode_map = kh_init(wd_to_inode);
+	inotify->inode_map = kh_init(wd_set);
 	if (!inotify->inode_map) {
 		XAL_DEBUG("FAILED: kh_init()");
-		return -EINVAL;
+		err = -EINVAL;
+		goto failed;
 	}
 
 	return 0;
+
+failed:
+	if (inotify->fd >= 0) {
+		close(inotify->fd);
+		inotify->fd = -1;
+	}
+	pthread_mutex_destroy(&inotify->lifecycle);
+
+	return err;
 }
 
 int
@@ -111,6 +164,7 @@ xal_be_fiemap_inotify_drain(struct xal_inotify *inotify)
 {
 	char buf[4096];
 	ssize_t len;
+	int err;
 
 	if (!inotify) {
 		XAL_DEBUG("FAILED: No inotify object given");
@@ -121,13 +175,20 @@ xal_be_fiemap_inotify_drain(struct xal_inotify *inotify)
 		len = read(inotify->fd, buf, sizeof(buf));
 	} while (len > 0);
 
+	/* The fd is non-blocking: EAGAIN is the queue running dry. */
+	if (len < 0 && errno != EAGAIN) {
+		err = -errno;
+		XAL_DEBUG("FAILED: read(); err(%d)", err);
+		return err;
+	}
+
 	return 0;
 }
 
 int
 xal_be_fiemap_inotify_clear_inode_map(struct xal_inotify *inotify)
 {
-	khash_t(wd_to_inode) *inode_map;
+	khash_t(wd_set) *inode_map;
 
 	if (!inotify) {
 		XAL_DEBUG("FAILED: No inotify object given");
@@ -136,17 +197,33 @@ xal_be_fiemap_inotify_clear_inode_map(struct xal_inotify *inotify)
 
 	inode_map = inotify->inode_map;
 
-	kh_clear(wd_to_inode, inode_map);
+	/* Drop the kernel watches, not just the map entries: this stops a departed directory
+	 * from reporting, and from leaking its fs.inotify.max_user_watches slot. */
+	for (khiter_t k = kh_begin(inode_map); k != kh_end(inode_map); ++k) {
+		if (!kh_exist(inode_map, k)) {
+			continue;
+		}
+		if (inotify_rm_watch(inotify->fd, (int)kh_key(inode_map, k)) && (errno != EINVAL)) {
+			/* EINVAL is the normal end of a watch on a deleted directory. */
+			XAL_DEBUG("FAILED: inotify_rm_watch(%d); errno(%d)",
+				  (int)kh_key(inode_map, k), errno);
+		}
+	}
+
+	kh_clear(wd_set, inode_map);
 
 	return 0;
 }
 
 int
-xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path, struct xal_inode *inode)
+xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path)
 {
-	khash_t(wd_to_inode) *inode_map;
-	uint32_t mask = IN_CREATE | IN_DELETE | IN_MOVE | IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_UNMOUNT;
-	khiter_t iter;
+	khash_t(wd_set) *inode_map;
+	/* IN_MOVE_SELF and IN_DELETE_SELF report on the watched directory itself. Without them the
+	 * index root's disappearance is invisible: every other directory is covered by the watch
+	 * on its parent, and nothing watches above the root. */
+	uint32_t mask = IN_CREATE | IN_DELETE | IN_MOVE | IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE |
+			IN_MOVE_SELF | IN_DELETE_SELF | IN_UNMOUNT;
 	int wd, err;
 
 	if (!inotify) {
@@ -156,11 +233,6 @@ xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path, struc
 
 	inode_map = inotify->inode_map;
 
-	if (!xal_inode_is_dir(inode)) {
-		XAL_DEBUG("FAILED: cannot process directory at path(%s) - not a directory", path);
-		return -EINVAL;
-	}
-
 	if (inotify->watch_mode) {
 		wd = inotify_add_watch(inotify->fd, path, mask);
 		if (wd < 0) {
@@ -168,12 +240,11 @@ xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path, struc
 			return -errno;
 		}
 
-		iter = kh_put(wd_to_inode, inode_map, wd, &err);
+		kh_put(wd_set, inode_map, wd, &err);
 		if (err < 0) {
 			XAL_DEBUG("FAILED: kh_put()");
 			return -EIO;
 		}
-		kh_value(inode_map, iter) = inode;
 	}
 
 	return 0;
@@ -203,6 +274,18 @@ inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
 		wrtn = snprintf(str + idx, str_sz - idx, "%s", " IN_MOVE");
 		idx += wrtn;
 	}
+	if (mask & IN_MOVE_SELF) {
+		wrtn = snprintf(str + idx, str_sz - idx, "%s", " IN_MOVE_SELF");
+		idx += wrtn;
+	}
+	if (mask & IN_DELETE_SELF) {
+		wrtn = snprintf(str + idx, str_sz - idx, "%s", " IN_DELETE_SELF");
+		idx += wrtn;
+	}
+	if (mask & IN_IGNORED) {
+		wrtn = snprintf(str + idx, str_sz - idx, "%s", " IN_IGNORED");
+		idx += wrtn;
+	}
 	if (mask & IN_ISDIR) {
 		wrtn = snprintf(str + idx, str_sz - idx, "%s", " IN_ISDIR");
 		idx += wrtn;
@@ -220,45 +303,45 @@ inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
 }
 
 /**
- * Drain the inotify queue, applying incrementally what can be applied
+ * Drain the inotify queue and report whether the index must be rebuilt
  *
  * @return On success XAL_INOTIFY_NOCHANGE or XAL_INOTIFY_REINDEX is returned, the latter asking
  * the caller for a full re-index. On error, negative errno is returned and the watch is over.
  */
 static int
-check_events(struct xal *xal, struct xal_inotify *inotify)
+check_events(struct xal_inotify *inotify)
 {
-	struct xal_inode *dir_inode, *inode;
-	kh_wd_to_inode_t *inode_map;
 	char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
-	char path[XAL_INODE_PATH_MAXLEN + 1];
-	khiter_t iter;
 	ssize_t len, i;
-	struct stat st;
 	int err;
-
-	inode_map = inotify->inode_map;
 
 	len = read(inotify->fd, buf, sizeof buf);
 	while (len > 0) {
-		int wd;
 		i = 0;
 
 		while (i < len) {
 			struct inotify_event *event = (struct inotify_event *)&buf[i];
 			__attribute__((unused)) char mask_pp[128];
-			size_t namelen;
-			int dirlen;
-
-			inode = NULL;  // reset the pointer to the inode
-			wd = event->wd;
 
 			XAL_DEBUG_FCALL(inotify_event_mask_pp, event->mask, mask_pp, 128);
-			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1], wd, event->name)
+			/* len is 0 for events about the watched directory itself. */
+			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1], event->wd,
+				  event->len ? event->name : "(none)")
 
-			if (inotify->watch_mode == XAL_WATCHMODE_DIRTY_DETECTION) {
-				XAL_DEBUG("INFO: File system has changed;");
+			/* Events were dropped: wd is -1 and no name is carried, so nothing here can
+			 * say what changed. */
+			if (event->mask & IN_Q_OVERFLOW) {
+				XAL_DEBUG("INFO: inotify queue overflowed; events were lost");
 				return XAL_INOTIFY_REINDEX;
+			}
+
+			/* A watch descriptor is gone, not a filesystem change: this follows every
+			 * inotify_rm_watch(). A directory deleted under a watch is already
+			 * reported by IN_DELETE on the parent, or IN_DELETE_SELF when it was the
+			 * index root. */
+			if (event->mask & IN_IGNORED) {
+				i += sizeof(struct inotify_event) + event->len;
+				continue;
 			}
 
 			/* The only fatal one: the filesystem is gone, so there is neither
@@ -268,95 +351,38 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				return -EINVAL;
 			}
 
-			if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE)) {
-				iter = kh_get(wd_to_inode, inode_map, wd);
-				if (iter == kh_end(inode_map)) {
-					XAL_DEBUG("FAILED: kh_get(%d) for event with name(%s)", wd, event->name);
-					return XAL_INOTIFY_REINDEX;
-				}
-
-				XAL_DEBUG("INFO: found watch descriptor(%d) for event with name(%s)", wd, event->name);
-
-				dir_inode = kh_val(inode_map, iter);
-				if (!xal_inode_is_dir(dir_inode)) {
-					XAL_DEBUG("FAILED: found inode(%s) is not a directory", dir_inode->name);
-					return XAL_INOTIFY_REINDEX;
-				}
-
-				dirlen = xal_inode_path(xal, dir_inode, path, sizeof(path));
-				if (dirlen < 0) {
-					XAL_DEBUG("FAILED: xal_inode_path(); err(%d)", dirlen);
-					return XAL_INOTIFY_REINDEX;
-				}
-
-				namelen = strlen(event->name);
-				if ((size_t)dirlen + 1 + namelen + 1 > sizeof(path)) {
-					XAL_DEBUG("FAILED: event(%s) full path too long(%zu)",
-						  event->name, (size_t)dirlen + 1 + namelen + 1);
-					return XAL_INOTIFY_REINDEX;
-				}
-				path[dirlen] = '/';
-				memcpy(path + dirlen + 1, event->name, namelen + 1);
-
-				XAL_DEBUG("INFO: got full path of event: %s", path);
-				atomic_fetch_add(xal->seq_lock, 1);
-
-				for (uint32_t j = 0; j < dir_inode->content.dentries.count; ++j) {
-					struct xal_inode *child = xal_inode_at(xal, dir_inode->content.dentries.inodes_idx + j);
-
-					if (strcmp(child->name, event->name) == 0) {
-						inode = child;
-						break;
-					}
-				}
-
-				if (!inode) {
-					XAL_DEBUG("FAILED: could not find child with name(%s)", event->name);
-					err = XAL_INOTIFY_REINDEX;
-					goto failed_with_lock;
-				}
-
-				XAL_DEBUG("INFO: reprocessing inode:");
-				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
-
-				err = xal_be_fiemap_process_inode_file(xal, path, inode);
-				if (err) {
-					XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_file(); err(%d)", err);
-					err = XAL_INOTIFY_REINDEX;
-					goto failed_with_lock;
-				}
-
-				// Update to new file size
-				err = stat(path, &st);
-				if (err) {
-					XAL_DEBUG("FAILED: stat(%s) errno(%d) while getting new file size", path, errno);
-					err = XAL_INOTIFY_REINDEX;
-					goto failed_with_lock;
-				}
-				inode->size = st.st_size;
-
-				XAL_DEBUG("INFO: finished reprocessing inode:");
-				XAL_DEBUG_FCALL(xal_inode_pp, xal, inode);
-
-				atomic_fetch_add(xal->seq_lock, 1);
-
-			} else if (event->mask & (IN_CREATE | IN_DELETE | IN_MOVE)) {
-				XAL_DEBUG("INFO: File system has changed, event mask:%s", mask_pp);
-				return XAL_INOTIFY_REINDEX;
+			/* Our own snapshot work lands in the watched mountpoint directory. What
+			 * happens inside a shadow dir is invisible -- the walk never descends into
+			 * one -- so dropping the event by name is what keeps a snapshot from
+			 * reporting itself as a change. */
+			if (event->len && (strncmp(event->name, XAL_SNAPSHOT_PREFIX,
+						   sizeof(XAL_SNAPSHOT_PREFIX) - 1) == 0)) {
+				XAL_DEBUG("INFO: ignoring own snapshot dir; name(%s)", event->name);
+				i += sizeof(struct inotify_event) + event->len;
+				continue;
 			}
 
-			i += sizeof(struct inotify_event) + event->len;
+			/* Every surviving event means the same thing. The clones hold the blocks,
+			 * so an event cannot invalidate extents a reader already has; it only says
+			 * a re-snapshot would see something different. No per-event incremental
+			 * path: re-reading extents for the changed file would take them from the
+			 * unpinned origin. */
+			XAL_DEBUG("INFO: file system moved on under the snapshot");
+
+			return XAL_INOTIFY_REINDEX;
 		}
 
 		len = read(inotify->fd, buf, sizeof buf);
 	}
 
+	/* The fd is non-blocking: EAGAIN is the queue running dry, anything else ends the watch. */
+	if (len < 0 && errno != EAGAIN) {
+		err = -errno;
+		XAL_DEBUG("FAILED: read(); err(%d)", err);
+		return err;
+	}
+
 	return XAL_INOTIFY_NOCHANGE;
-
-failed_with_lock:
-	atomic_fetch_add(xal->seq_lock, 1);
-
-	return err;
 }
 
 static void *
@@ -398,13 +424,41 @@ background_thread_start(void *arg)
 				if (be->inotify->cb) {
 					be->inotify->cb(xal, be->inotify->cb_args);
 				}
-				cb_seq = seq;
+
+				/* xal_index() advances seq_lock twice whether or not it worked,
+				 * so on failure the advance is not a new version. Latch to where
+				 * it ended up, so as to not fire again. */
+				cb_seq = atomic_load(&xal->last_index_err) ? atomic_load(xal->seq_lock)
+									  : seq;
 				continue;
 			}
 
-			/* Already notified for this version, and the queue cannot help: events
-			 * pending there would make a poll on the fd return at once. */
-			poll(NULL, 0, XAL_INOTIFY_POLL_TIMEOUT_MS);
+			/* Already fired for this version; only a new event re-arms us, and it must
+			 * be read through check_events(), which tells a change from IN_IGNORED and
+			 * from our own snapshot work. The poll is the wait; the fd is non-blocking. */
+			err = poll(&pfd, 1, XAL_INOTIFY_POLL_TIMEOUT_MS);
+			if (err < 0) {
+				if (errno == EINTR) {
+					continue;
+				}
+				err = -errno;
+				XAL_DEBUG("FAILED: poll(); err(%d), exit thread", err);
+				xal_mark_dirty(xal);
+				goto exit_thread;
+			}
+			if (!err) {
+				continue;
+			}
+
+			err = check_events(be->inotify);
+			if (err < 0) {
+				XAL_DEBUG("FAILED: check_events(); err(%d), exit thread", err);
+				xal_mark_dirty(xal);
+				goto exit_thread;
+			}
+			if (err == XAL_INOTIFY_REINDEX) {
+				cb_seq = -1;
+			}
 			continue;
 		}
 
@@ -427,9 +481,9 @@ background_thread_start(void *arg)
 			continue;
 		}
 
-		err = check_events(xal, be->inotify);
+		err = check_events(be->inotify);
 		if (err < 0) {
-			XAL_DEBUG("FAILED: xal_be_fiemap_inotify_check_events(), exit thread; err(%d)", err);
+			XAL_DEBUG("FAILED: check_events(), exit thread; err(%d)", err);
 			/* Nothing re-indexes once this loop is left, so leave the index dirty:
 			 * readers get -ESTALE instead of extents for a vanished filesystem. */
 			xal_mark_dirty(xal);
@@ -444,7 +498,7 @@ background_thread_start(void *arg)
 	}
 
 exit_thread:
-	XAL_DEBUG("INFO: unlocked xal lock");
+	XAL_DEBUG("INFO: watch thread exiting");
 
 	if (be->inotify) {
 		atomic_fetch_or(&be->inotify->flag, XAL_BE_FIEMAP_INOTIFY_EXITED);
@@ -476,40 +530,59 @@ xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args)
 		return -EINVAL;
 	}
 
+	/* Checked before the lock: neither has anything to do with the watch thread, and taking
+	 * the lock only to fail would let a caller with a broken index block a reaper. */
+	if (xal->root_idx == XAL_POOL_IDX_NONE) {
+		XAL_DEBUG("FAILED: Missing call to xal_index()");
+		return -EINVAL;
+	}
+
+	/* root_idx is claimed before the walk, so the check above catches an index that never ran
+	 * but not one that ran and failed. */
+	if (atomic_load(&xal->last_index_err)) {
+		XAL_DEBUG("FAILED: the last index failed; err(%d)",
+			  atomic_load(&xal->last_index_err));
+		return atomic_load(&xal->last_index_err);
+	}
+
+	/* watch_thread_id and JOINABLE are published together under this lock: a reaper sees
+	 * neither, or a written id and JOINABLE, never one without the other. */
+	pthread_mutex_lock(&be->inotify->lifecycle);
+
+	/* Live includes a thread a reaper has claimed but not yet seen exit. */
 	if (xal_be_fiemap_inotify_is_live(be->inotify)) {
+		pthread_mutex_unlock(&be->inotify->lifecycle);
 		XAL_DEBUG("SKIPPED: thread already running");
 		return 0;
 	}
 
+	/* Not live, so a JOINABLE thread here has already exited and this join returns at once;
+	 * holding the lock across it costs nothing. */
 	if (atomic_load(&be->inotify->flag) & XAL_BE_FIEMAP_INOTIFY_JOINABLE) {
 		pthread_join(be->inotify->watch_thread_id, NULL);
-		atomic_fetch_and(&be->inotify->flag,
-				 ~(XAL_BE_FIEMAP_INOTIFY_JOINABLE | XAL_BE_FIEMAP_INOTIFY_EXITED));
-	}
-
-	if (xal->root_idx == XAL_POOL_IDX_NONE) {
-		XAL_DEBUG("FAILED: Missing call to xal_index()");
-		return -EINVAL;
+		atomic_fetch_and(&be->inotify->flag, ~XAL_BE_FIEMAP_INOTIFY_JOINABLE);
 	}
 
 	be->inotify->cb = cb;
 	be->inotify->cb_args = cb_args;
 	atomic_store(&be->inotify->stop, false);
 
-	/* No thread of ours is running here, so a bit left from an earlier one would only make the
-	 * one created below look exited. */
+	/* Cleared before the thread exists, so the EXITED it raises can never be overwritten. */
 	atomic_fetch_and(&be->inotify->flag, ~XAL_BE_FIEMAP_INOTIFY_EXITED);
 
 	err = pthread_create(&be->inotify->watch_thread_id, NULL, &background_thread_start, xal);
 	if (err) {
+		atomic_fetch_or(&be->inotify->flag, XAL_BE_FIEMAP_INOTIFY_EXITED);
+	} else {
+		atomic_fetch_or(&be->inotify->flag, XAL_BE_FIEMAP_INOTIFY_JOINABLE);
+	}
+
+	pthread_mutex_unlock(&be->inotify->lifecycle);
+
+	if (err) {
 		XAL_DEBUG("FAILED: pthread_create(); err(%d)", err);
 		return -err;
 	}
-
-	/* Raised only now: until pthread_create() returns, watch_thread_id names no thread a reaper
-	 * may join. A thread that exits before this store leaves EXITED behind, which this does not
-	 * disturb, so the two sides never overwrite each other. */
-	atomic_fetch_or(&be->inotify->flag, XAL_BE_FIEMAP_INOTIFY_JOINABLE);
 
 	return 0;
 }
@@ -519,6 +592,7 @@ xal_stop_watching_filesystem(struct xal *xal)
 {
 	struct xal_backend_base *base;
 	struct xal_be_fiemap *be;
+	pthread_t tid;
 	int err;
 
 	if (!xal) {
@@ -538,29 +612,20 @@ xal_stop_watching_filesystem(struct xal *xal)
 		return -EINVAL;
 	}
 
-	if (!(atomic_load(&be->inotify->flag) & XAL_BE_FIEMAP_INOTIFY_JOINABLE)) {
-		XAL_DEBUG("FAILED: no thread to stop");
-		return -EINVAL;
-	}
-
-	/* Refuse a self-join before storing stop, so a call from xal_dirty_cb does not stop the
-	 * watcher as a side effect of failing. */
-	if (pthread_equal(pthread_self(), be->inotify->watch_thread_id)) {
-		XAL_DEBUG("FAILED: called from the watch thread");
-		return -EDEADLK;
-	}
-
-	atomic_store(&be->inotify->stop, true);
-	err = pthread_join(be->inotify->watch_thread_id, NULL);
+	/* Reaped the same way whether it was told to stop or exited on its own. */
+	err = inotify_claim_join(be->inotify, true, &tid);
 	if (err) {
-		/* ESRCH or EINVAL: there is nothing left to reap, so clear the bits anyway. 
-		 * EDEADLK is caught by the if-statement above. */
-		XAL_DEBUG("FAILED: pthread_join(); err(%d)", err);
-		err = -err;
+		XAL_DEBUG("FAILED: inotify_claim_join(); err(%d)", err);
+		return err;
 	}
 
-	atomic_fetch_and(&be->inotify->flag,
-			 ~(XAL_BE_FIEMAP_INOTIFY_JOINABLE | XAL_BE_FIEMAP_INOTIFY_EXITED));
+	err = pthread_join(tid, NULL);
+	if (err) {
+		/* ESRCH or EINVAL: nothing is left to reap, and the claim has already dropped
+		 * JOINABLE. */
+		XAL_DEBUG("FAILED: pthread_join(); err(%d)", err);
+		return -err;
+	}
 
-	return err;
+	return 0;
 }

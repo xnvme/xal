@@ -52,9 +52,6 @@ on_dirty(struct xal *xal, void *cb_args)
 	struct xal_server_watch *watch = cb_args;
 	int err;
 
-	/* xal_index() advances seq_lock on its exit path whether or not it succeeded, and the
-	 * watch loop fires again on any advance while the state is dirty. Returning without the
-	 * latch would rebuild the pools and emit LOG_CRIT back to back with nothing to stop it. */
 	if (watch->index_failed) {
 		return;
 	}
@@ -117,8 +114,9 @@ publish(const struct xal_server_conf *conf, struct xal_server_watch *watch, stru
 		goto failed;
 	}
 
-	/* Reflink snapshot mode pins extents with clones at index time and runs no watcher. */
-	if (conf->watch_mode && (conf->watch_mode != XAL_WATCHMODE_REFLINK_SNAPSHOT)) {
+	/* The clones keep a reader's extents valid; the watcher tells it the snapshot has gone
+	 * stale. */
+	if (conf->watch_mode) {
 		err = xal_watch_filesystem(xal, on_dirty, watch);
 		if (err) {
 			syslog(LOG_ERR, "FAILED: xal_watch_filesystem(%s); err(%d)", dev->uri, err);

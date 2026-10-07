@@ -76,10 +76,6 @@ main(int argc, char *argv[])
 	opts.mountpoint = argv[2];
 	opts.shm_name = SHM_NAME;
 
-	// Set watchmode to avoid BPF failures in WATCHMODE_NONE in the CI. When
-	// issues have been fixed, set the watchmode back to none.
-	opts.watch_mode = XAL_WATCHMODE_DIRTY_DETECTION;
-
 	err = xal_open(dev, &xal, &opts);
 	if (err) {
 		fprintf(stderr, "FAILED: xal_open(); err(%d)\n", err);
