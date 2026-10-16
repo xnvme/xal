@@ -21,6 +21,7 @@
 #include <xal.h>
 #include <xal_be_fiemap.h>
 #include <xal_be_fiemap_inotify.h>
+#include <xal_be_fiemap_lease.h>
 #include <xal_odf.h>
 #include <xal_bpf_events.h>
 #include <xal_bpf.h>
@@ -364,6 +365,8 @@ xal_be_fiemap_close(struct xal *xal)
 		XAL_DEBUG("INFO: secondary; watcher, snapshot and freeze belong to the primary");
 	} else if (be->inotify) {
 		xal_be_fiemap_inotify_close(be->inotify);
+	} else if (be->lease) {
+		xal_be_fiemap_lease_close(xal);
 	} else if (be->reflink) {
 		if (be->reflink->dir_created) {
 			reflink_dir_purge(be->reflink->dir);
@@ -634,7 +637,21 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		}
 	}
 
-	if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
+	if (opts->watch_mode == XAL_WATCHMODE_READ_LEASE) {
+		// read-lease mode: no inotify watch, no freeze; files are mapped on demand under a lease.
+		// The leases and reader counts are this process's, so other processes have nothing to pin.
+		if (opts->shm_name) {
+			XAL_DEBUG("FAILED: XAL_WATCHMODE_READ_LEASE does not support shm_name");
+			err = -ENOTSUP;
+			goto failed;
+		}
+
+		err = xal_be_fiemap_lease_init(cand, be->mountpoint, opts);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_lease_init(); err(%d)", err);
+			goto failed;
+		}
+	} else if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
 		// reflink-snapshot mode: no inotify watch, no freeze; clones pin the blocks
 		size_t dlen;
 
@@ -1015,6 +1032,12 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 		return -EINVAL;
 	}
 
+	/* Mapped on demand by xal_extents_acquire(), under a lease. */
+	if (be->lease) {
+		inode->content.extents.count = 0;
+		return be->path_inode_map ? path_map_insert(be->path_inode_map, path, inode) : 0;
+	}
+
 	/* An entry replaced since it was classified is neither followed nor blocked on. */
 	fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
 	if (fd < 0) {
@@ -1184,6 +1207,14 @@ xal_be_fiemap_index(struct xal *xal)
 		return -EINVAL;
 	}
 
+	// Leases point at inodes in the pools about to be cleared. Refused before the index state
+	// changes, so that a caller holding extents keeps a usable handle.
+	err = xal_be_fiemap_lease_reset(xal, false);
+	if (err) {
+		XAL_DEBUG("FAILED: xal_be_fiemap_lease_reset(); err(%d)", err);
+		return err;
+	}
+
 	atomic_store(xal->index_state, XAL_STATE_INDEXING);
 
 	XAL_DEBUG("INFO: waiting for xal lock");
@@ -1260,6 +1291,12 @@ xal_be_fiemap_index(struct xal *xal)
 
 	if (be->reflink) {
 		XAL_DEBUG("INFO: reflink snapshot complete; clones under dir(%s)", be->reflink->dir);
+	}
+
+	err = xal_be_fiemap_lease_prepare(xal);
+	if (err) {
+		XAL_DEBUG("FAILED: xal_be_fiemap_lease_prepare(); err(%d)", err);
+		goto exit;
 	}
 
 exit:

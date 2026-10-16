@@ -42,6 +42,7 @@ sources = files(
   'src/xal.c',
   'src/xal_be_fiemap.c',
   'src/xal_be_fiemap_inotify.c',
+  'src/xal_be_fiemap_lease.c',
   'src/xal_bpf.c',
   'src/xal_be_xfs.c',
   'src/xal_pool.c',

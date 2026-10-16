@@ -84,8 +84,9 @@ fitting watchmode is set.
 Either mode ignores events on entries the index skips: symlinks, special
 files and mount points.
 
-When opened with a `watch_mode` other than `XAL_WATCHMODE_NONE`, an
-inotify watch is registered for every directory during `xal_index()`.
+When opened with `XAL_WATCHMODE_DIRTY_DETECTION` or
+`XAL_WATCHMODE_EXTENT_UPDATE`, an inotify watch is registered for every
+directory during `xal_index()`.
 A background thread started with `xal_watch_filesystem()` then processes
 events. The watched event mask per directory is: `IN_CREATE`,
 `IN_DELETE`, `IN_MOVE`, `IN_MODIFY`, `IN_ATTRIB`,
@@ -93,6 +94,64 @@ events. The watched event mask per directory is: `IN_CREATE`,
 
 BPF is used to monitor changes made by the filesystem itself. However, this module
 is only loaded if the dependencies are present.
+
+#### Read leases
+
+**`XAL_WATCHMODE_READ_LEASE`**
+: `xal_index()` builds the tree without extents. `xal_extents_acquire()`
+  maps a file the first time it is asked for, while holding a read lease on
+  it (`F_SETLEASE`, `F_RDLCK`) and with `FIEMAP_FLAG_SYNC`, so dirty data is
+  written back first. Unwritten extents, which read as zeros, are left out,
+  and extents past the end of the file are left out or cut at the block
+  holding it. A writer that opens or truncates
+  the file then waits until every caller between `xal_extents_acquire()`
+  and `xal_extents_release()` is done; xal releases the lease, the writer
+  goes ahead, and the next `xal_extents_acquire()` maps the file again. A
+  file open for writing gets no lease, and `xal_extents_acquire()` returns
+  `-EAGAIN` for it.
+
+Where `XAL_WATCHMODE_REFLINK_SNAPSHOT` lets writers go ahead and keeps the
+old data for readers, this mode makes writers wait for readers, and writes
+nothing to the filesystem itself. It needs:
+
+* the files to be owned by the caller, or `CAP_LEASE`
+* one file descriptor per file under a lease. Past `xal_opts.lease_max`, by
+  default half the soft `RLIMIT_NOFILE`, or when out of descriptors, xal
+  drops the lease of a file without readers that was not acquired since the
+  last pass, and maps it again on its next `xal_extents_acquire()`
+* readers to release within `/proc/sys/fs/lease-break-time` seconds, after
+  which the kernel lets a waiting writer through anyway; a later
+  `xal_extents_release()` returns `-ESTALE` once xal's thread has taken the
+  break. A reader that holds the extents for long can poll
+  `xal_extents_recalled()`, which takes no lock, and release once a writer
+  waits. A `lease-break-time` of 0 makes the kernel wait for readers however
+  long they take, for every lease on the system
+* the caller not to use `SIGRTMIN+7`, nor to rely on `SIGIO` sent to the
+  process, while a handle in this mode is open
+
+Breaks reach a thread of xal's as `SIGRTMIN+7`, or `SIGIO`, directed at it
+with `F_SETOWN_EX`; it blocks all signals and takes these with
+`sigtimedwait()`, so no signal disposition of the process changes. A writer
+that opens with `O_NONBLOCK`, as coreutils `truncate` does, does not wait:
+it gets `EWOULDBLOCK` while any lease is held on the file, and succeeds on a
+retry once xal has released it. The leases belong to the process that opened
+the handle; in a forked child `xal_extents_acquire()` and `xal_index()`
+return `-ECHILD`.
+
+`xal_extents_release()` returns `-ESTALE` when the kernel has let a writer
+past the broken lease, so the caller knows to drop what it read. Changes that
+do not open the file for writing do not wait for readers: a dedupe through a
+read-only descriptor, or data moved by the filesystem itself as zoned XFS
+garbage collection does. The release therefore also maps the file again and
+returns `-ESTALE` when its extents changed, at the cost of a FIEMAP per
+release; on XFS, releases of files that have ever shared blocks, as copies
+made by `cp --reflink` have, also wait for each other on the allocation
+group. `xal_opts.lease_no_recheck` leaves the FIEMAP out. Writes to the block
+device itself are not seen.
+
+It does not support `shm_name`. A file with delayed allocation, inline,
+encoded or encrypted data is refused with `-EOPNOTSUPP`. See
+`xal_extents_acquire()` and `xal_extents_release()` in `include/libxal.h`.
 
 #### File lookup modes
 

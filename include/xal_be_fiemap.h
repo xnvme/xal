@@ -2,6 +2,7 @@
 #define XAL_BE_FIEMAP_H
 
 struct xal_reflink;
+struct xal_lease_set;
 
 struct xal_be_fiemap {
 	struct xal_backend_base base;
@@ -12,6 +13,7 @@ struct xal_be_fiemap {
 	void *path_inode_map;  ///< Map of paths to inodes
 
 	struct xal_reflink *reflink; ///< Reflink-snapshot state; non-NULL in XAL_WATCHMODE_REFLINK_SNAPSHOT
+	struct xal_lease_set *lease;  ///< Read-lease state; non-NULL in XAL_WATCHMODE_READ_LEASE
 };
 XAL_STATIC_ASSERT(sizeof(struct xal_be_fiemap) == XAL_BACKEND_SIZE, "Incorrect size");
 

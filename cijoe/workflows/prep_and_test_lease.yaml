@@ -1,0 +1,37 @@
+---
+doc: |
+  Prepare an XFS filesystem and run the read-lease tests
+
+  * Assumes a block-device is available at 'config.xal.dev_path'
+  * Formats it with XFS and keeps it mounted, as XAL_WATCHMODE_READ_LEASE works on a mounted
+    filesystem through the FIEMAP backend
+  * Runs the read-lease tests (tests/test_lease.py), which drive the 'xal_lease_hold' helper to
+    hold a file's extents while a writer opens or truncates it
+
+steps:
+- name: prep_bdev
+  uses: prep_loop
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    size-in-gb: 10
+
+- name: prep_fs
+  uses: prep_xfs
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+
+- name: prep_files
+  uses: prep_files
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    keep_mounted: true
+    skip_populate: true
+
+- name: test
+  uses: core.testrunner
+  with:
+    run_local: true
+    random_order: false
+    args: "tests/test_lease.py"
