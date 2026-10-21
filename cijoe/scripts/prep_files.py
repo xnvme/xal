@@ -28,7 +28,11 @@ def str2bool(value: str) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-COLUMNS = ["startoffset", "endoffset", "startblock", "endblock"]
+COLUMNS = ["startoffset", "endoffset", "startblock", "endblock", "flag"]
+
+# xfs_bmap -vp FLAGS bits, and the enum xal_extent_flag bit each stands for. The bmap test reads
+# the device with the XFS backend, which cannot see sharing, so the shared bit is not recorded.
+XFS_BMAP_FLAGS = {0o010000: 1 << 0}  # unwritten
 
 
 def create_directory_with_urandom_content(
@@ -286,13 +290,16 @@ def produce_bmap(args: Namespace, cijoe: Cijoe):
     def get_extents(path: Path):
         """The given path is expected to be absolute"""
 
+        # -p marks unwritten extents; the FLAGS column is there only when some extent has a flag
         regex = (
             r"^(?P<ident>\d+):\s+"
             r"\[(?P<startoffset>\d+)\.\.(?P<endoffset>\d+)\]:\s+"
-            r"(?P<startblock>\d+)\.\.(?P<endblock>\d+)$"
+            r"(?P<startblock>\d+)\.\.(?P<endblock>\d+)\s+"
+            r"\d+\s+\(\d+\.\.\d+\)\s+\d+"
+            r"(?:\s+(?P<flags>[0-7]+))?$"
         )
 
-        cmd = f"xfs_bmap {path}"
+        cmd = f"xfs_bmap -vp {path}"
         err, state = cijoe.run(cmd)
         if err:
             print("Failed running: %s" % " ".join(cmd))
@@ -302,7 +309,10 @@ def produce_bmap(args: Namespace, cijoe: Cijoe):
         for line in state.output().splitlines():
             match = re.match(regex, line.strip())
             if match:
-                extent = {key: int(val) for key, val in match.groupdict().items()}
+                fields = match.groupdict()
+                flags = int(fields.pop("flags") or "0", 8)
+                extent = {key: int(val) for key, val in fields.items()}
+                extent["flag"] = sum(bit for f, bit in XFS_BMAP_FLAGS.items() if flags & f)
                 extents.append([extent.get(col) for col in COLUMNS])
 
         return extents

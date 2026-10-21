@@ -9,7 +9,8 @@ doc: |
   currently mounted.
 
   Unlike the loop/zram variants there is no block-device creation step -- the NVMe device is assumed
-  to already exist. Steps: format (reflink) -> mount (no population) -> run tests/test_reflink.py.
+  to already exist. Steps: format (reflink) -> mount (no population) -> run tests/test_reflink.py,
+  tests/test_fiemap.py and tests/test_server.py.
 
 steps:
 - name: prep_fs
@@ -32,4 +33,4 @@ steps:
   with:
     run_local: true
     random_order: false
-    args: "tests/test_reflink.py"
+    args: "tests/test_reflink.py tests/test_fiemap.py tests/test_server.py"

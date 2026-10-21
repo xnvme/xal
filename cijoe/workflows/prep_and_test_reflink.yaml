@@ -8,6 +8,8 @@ doc: |
   * Runs the reflink-snapshot tests (tests/test_reflink.py), which drive the
     'xal_snapshot_hold' helper to hold a live snapshot open while asserting fidelity,
     immutability, CoW stability, subtree scoping, and purge-on-close.
+  * Runs the other tests that need the filesystem mounted: the FIEMAP backend's extent flags
+    (tests/test_fiemap.py) and xal-server (tests/test_server.py).
 
 steps:
 - name: prep_bdev
@@ -36,4 +38,4 @@ steps:
   with:
     run_local: true
     random_order: false
-    args: "tests/test_reflink.py"
+    args: "tests/test_reflink.py tests/test_fiemap.py tests/test_server.py"

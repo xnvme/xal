@@ -26,6 +26,8 @@ KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
 
 /** Max length of a "<dir>/<entry>" path assembled under the shadow directory. */
 #define XAL_SNAPSHOT_ENTRY_MAXLEN (XAL_PATH_MAXLEN + 64)
+/** Times read_fiemap() maps a file whose mapping keeps growing before it gives up. */
+#define XAL_FIEMAP_ATTEMPTS 8
 
 /**
  * Insert the given path into the path-to-inode map
@@ -886,51 +888,124 @@ exit:
 	return err;
 }
 
+/**
+ * Run FS_IOC_FIEMAP, with FIEMAP_FLAG_SYNC while *sync is set
+ *
+ * When a writeback of the file failed, then or earlier, the flush still writes the file back but
+ * then fails the ioctl with that error, which the kernel reports once, to the first caller that
+ * flushes. It says nothing about the mapping, so the ioctl is run again without the flag and
+ * *sync cleared for the rest of the file; see xal_index() for what the extents then mean.
+ */
+static int
+fiemap_ioctl(int fd, struct fiemap *fiemap, bool *sync)
+{
+	fiemap->fm_flags = *sync ? FIEMAP_FLAG_SYNC : 0;
+	if (!ioctl(fd, FS_IOC_FIEMAP, fiemap)) {
+		return 0;
+	}
+
+	if (*sync && (errno == EIO || errno == ENOSPC)) {
+		XAL_DEBUG("INFO: writeback failed; errno(%d); mapping without the flush", errno);
+		*sync = false;
+		fiemap->fm_flags = 0;
+		if (!ioctl(fd, FS_IOC_FIEMAP, fiemap)) {
+			return 0;
+		}
+	}
+
+	XAL_DEBUG("FAILED: fiemap ioctl(); errno(%d)", errno);
+	return -errno;
+}
+
 /*
  * Two ioctls: the first, with fm_extent_count 0, reports how many extents the file has; the
- * fiemap is then reallocated to fit and the ioctl re-run to read them.
+ * fiemap is then reallocated to fit and the ioctl re-run to read them. A file with no extents
+ * stops after the first, as the second would only count again. A mapping that grew in between
+ * fills the array without reaching FIEMAP_EXTENT_LAST, and is read again.
+ *
+ * FIEMAP_FLAG_SYNC writes dirty data back first, so delayed allocations are mapped to the blocks
+ * they got rather than to no block at all; see fiemap_ioctl() for a file whose writeback failed.
  */
 static int
 read_fiemap(int fd, struct fiemap **fiemap_ptr)
 {
 	struct fiemap *fiemap = *fiemap_ptr;
+	bool sync = true;
 	int extents_size;
+	uint32_t n;
+	int err;
 
 	if (!fiemap) {
 		return -EINVAL;
 	}
 
-	fiemap->fm_length = ~0;  // maximum number of bits
-	fiemap->fm_extent_count = 0;  // read 0 extents
+	for (int attempt = 0; attempt < XAL_FIEMAP_ATTEMPTS; attempt++) {
+		fiemap->fm_length = ~0;  // maximum number of bits
+		fiemap->fm_extent_count = 0;  // read 0 extents
 
-	if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
-		XAL_DEBUG("FAILED: fiemap ioctl(); errno(%d)", errno);
-		return -errno;
+		err = fiemap_ioctl(fd, fiemap, &sync);
+		if (err) {
+			return err;
+		}
+		if (!fiemap->fm_mapped_extents) {
+			return 0;
+		}
+
+		extents_size = sizeof(struct fiemap_extent) * fiemap->fm_mapped_extents;
+
+		fiemap = realloc(fiemap, sizeof(struct fiemap) + extents_size);
+		if (!fiemap) {
+			XAL_DEBUG("FAILED: fiemap realloc(); errno(%d)", errno);
+			return -errno;
+		}
+		// A moved buffer has freed the old one, and the caller frees *fiemap_ptr on every
+		// path, so hand the new one back before anything else can fail.
+		*fiemap_ptr = fiemap;
+
+		memset(fiemap->fm_extents, 0, extents_size);
+		fiemap->fm_extent_count = fiemap->fm_mapped_extents;
+		fiemap->fm_mapped_extents = 0;
+
+		err = fiemap_ioctl(fd, fiemap, &sync);
+		if (err) {
+			return err;
+		}
+
+		n = fiemap->fm_mapped_extents;
+		if (n < fiemap->fm_extent_count ||
+		    (fiemap->fm_extents[n - 1].fe_flags & FIEMAP_EXTENT_LAST)) {
+			return 0;
+		}
+		XAL_DEBUG("INFO: mapping grew past %" PRIu32 " extents; reading it again", n);
 	}
 
-	extents_size = sizeof(struct fiemap_extent) * fiemap->fm_mapped_extents;
+	XAL_DEBUG("FAILED: mapping still growing after %d attempts", XAL_FIEMAP_ATTEMPTS);
+	return -EAGAIN;
+}
 
-	fiemap = realloc(fiemap, sizeof(struct fiemap) + extents_size);
-	if (!fiemap) {
-		XAL_DEBUG("FAILED: fiemap realloc(); errno(%d)", errno);
-		return -errno;
+/**
+ * Translate the flags of a FIEMAP extent to the bits of enum xal_extent_flag
+ */
+static uint8_t
+fiemap_extent_flag(uint32_t fe_flags)
+{
+	const uint32_t noaddr = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC |
+				FIEMAP_EXTENT_ENCODED | FIEMAP_EXTENT_DATA_ENCRYPTED |
+				FIEMAP_EXTENT_NOT_ALIGNED | FIEMAP_EXTENT_DATA_INLINE |
+				FIEMAP_EXTENT_DATA_TAIL;
+	uint8_t flag = 0;
+
+	if (fe_flags & FIEMAP_EXTENT_UNWRITTEN) {
+		flag |= XAL_EXTENT_UNWRITTEN;
 	}
-	// A moved buffer has freed the old one, and the caller frees *fiemap_ptr on every path, so
-	// hand the new one back before anything else can fail.
-	*fiemap_ptr = fiemap;
-
-	memset(fiemap->fm_extents, 0, extents_size);
-	fiemap->fm_extent_count = fiemap->fm_mapped_extents;
-	fiemap->fm_mapped_extents = 0;
-
-	// TODO: writeback could happen between the first and second ioctl.
-	// check that fm_extent_count == fm_mapped_extents. retry if otherwise.
-	if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
-		XAL_DEBUG("FAILED: fiemap ioctl(); errno(%d)", errno);
-		return -errno;
+	if (fe_flags & FIEMAP_EXTENT_SHARED) {
+		flag |= XAL_EXTENT_SHARED;
+	}
+	if (fe_flags & noaddr) {
+		flag |= XAL_EXTENT_NOADDR;
 	}
 
-	return 0;
+	return flag;
 }
 
 static int
@@ -1008,7 +1083,7 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 			extent->start_offset = fiemap->fm_extents[i].fe_logical / xal->sb.blocksize;
 			extent->start_block  = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize;
 			extent->nblocks      = fiemap->fm_extents[i].fe_length / xal->sb.blocksize;
-			extent->flag         = fiemap->fm_extents[i].fe_flags;
+			extent->flag         = fiemap_extent_flag(fiemap->fm_extents[i].fe_flags);
 		}
 	}
 

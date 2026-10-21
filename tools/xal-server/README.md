@@ -34,7 +34,8 @@ devices = [
 #
 #   none              nothing is watched and nothing is pinned. The published extents are a
 #                     snapshot of the filesystem as it was at index time and a foreign write can
-#                     invalidate them at any point. For a deployment that owns the filesystem.
+#                     invalidate them at any point. For a deployment that owns the filesystem:
+#                     a reader that changes it calls xal_mark_dirty() to have it re-indexed.
 #   reflink snapshot  every indexed file is cloned into a shadow directory, so the blocks stay
 #                     pinned and readers keep valid LBAs under foreign writes. Needs an XFS
 #                     mount made with reflink=1, and CAP_LINUX_IMMUTABLE to protect the clones.
@@ -129,6 +130,13 @@ without reattaching, but a walk that raced the rewrite fails with `-ESTALE`; che
 change what a reader sees. See `enum xal_watchmode` in `libxal.h` for the guarantee in
 full.
 
+With `none`, nothing is watched: a reader that changed the filesystem itself, say by an
+allocating write, calls `xal_mark_dirty()` on its handle. The server polls for that mark every
+millisecond and re-indexes; a failed re-index stays dirty and is retried after a wait that doubles
+on each failure, up to a second. A re-index maps every file anew and first writes its dirty data
+back, so marks that come faster than a re-index completes keep the index dirty, and readers
+retrying on `-ESTALE` wait for them all.
+
 ### Reader protocol
 
 A reader works against the shared region by reference and validates the sequence lock around use:
@@ -149,5 +157,6 @@ the reader's buffer. On a mount the reader already has read access to, that is a
 problem solved by discarding and retrying -- treat it as an isolation problem only if the reader
 is not trusted with the rest of the filesystem.
 
-If re-indexing fails, the server logs it at ERROR and the index stays dirty; the next change the
-watch sees triggers another attempt.
+If re-indexing fails, the server logs it at ERROR and the index stays dirty. With a watch mode
+other than `none`, the next change the watch sees triggers another attempt; with `none`, the
+backoff above does.

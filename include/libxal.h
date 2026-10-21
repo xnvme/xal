@@ -98,11 +98,41 @@ struct xal_opts {
 	const char *subtree;
 };
 
+/**
+ * Bits of xal_extent.flag. They describe the blocks an extent names, and an extent with none of
+ * them set holds the file's data in those blocks. After a failed writeback of the file, or a
+ * write to it while it was mapped, the extents need not describe the file's data, whatever the
+ * bits say; see xal_index().
+ *
+ * The FIEMAP backend reports all of them. The XFS backend reads the on-disk extent record, which
+ * holds only the unwritten state: from it, a clear XAL_EXTENT_SHARED means unknown rather than
+ * unshared, and delayed allocations exist only in memory.
+ *
+ * In XAL_WATCHMODE_REFLINK_SNAPSHOT the extents are those of xal's clones, which hold only the
+ * written blocks of their origins: an extent then carries XAL_EXTENT_SHARED while any other file,
+ * normally the origin, still shares its blocks, so the bit says nothing about the origin, and the
+ * origin's unwritten ranges are holes.
+ */
+enum xal_extent_flag {
+	/** Allocated but never written: the filesystem reads it as zeros, while the blocks hold
+	 *  whatever they held before. */
+	XAL_EXTENT_UNWRITTEN = 1 << 0,
+
+	/** The blocks are shared with another file, as after a reflink: writing them in place
+	 *  changes that file too. */
+	XAL_EXTENT_SHARED = 1 << 1,
+
+	/** start_block is no address the file's data can be read or written at raw: a delayed
+	 *  allocation, data whose location the filesystem does not report, or data it keeps
+	 *  inline, packed into a tail, unaligned, encoded or encrypted. */
+	XAL_EXTENT_NOADDR = 1 << 2,
+};
+
 struct xal_extent {
 	uint64_t start_offset;
 	uint64_t start_block;
 	uint64_t nblocks;
-	uint8_t flag;
+	uint8_t flag; ///< Bits of enum xal_extent_flag
 } __attribute__((packed));
 
 int
@@ -210,7 +240,8 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode);
  * @param extent A pointer to a `xal_extent`
  * @param output A pointer to the output of the conversion
  *
- * @return On success a 0 is returned. On error, negative errno is returned to indicate the error.
+ * @return On success a 0 is returned. On error, negative errno is returned to indicate the error:
+ *         -ENODATA for an extent with XAL_EXTENT_NOADDR set, whose start_block is no address.
  */
 int
 xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
@@ -222,7 +253,8 @@ xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal
  * @param extent A pointer to a `xal_extent`
  * @param output A pointer to the output of the conversion
  *
- * @return On success a 0 is returned. On error, negative errno is returned to indicate the error.
+ * @return On success a 0 is returned. On error, negative errno is returned to indicate the error:
+ *         -ENODATA for an extent with XAL_EXTENT_NOADDR set, whose start_block is no address.
  */
 int
 xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
@@ -362,7 +394,26 @@ xal_dinodes_retrieve(struct xal *xal);
  * Only directories and regular files are indexed; symlinks and special files are skipped, and so
  * is anything mounted inside the tree with XAL_BACKEND_FIEMAP. That backend also checks the
  * mountpoint and opts->subtree again, as xal_open() does.
- * 
+ *
+ * XAL_BACKEND_FIEMAP writes each file's dirty data back before mapping it, so delayed allocations
+ * map to the blocks they got. When a writeback of the file failed, then or earlier, that flush
+ * still writes the file back but then reports the failure, which says nothing about the mapping:
+ * in XAL_WATCHMODE_NONE the file is then mapped again without it instead of failing the index.
+ * Its extents describe its blocks, which for the range that failed need not hold what the page
+ * cache does: that range maps as a hole, as unwritten, or as blocks still holding the data from
+ * before. fsync() on the file still reports the failure; the flush clears only the error the
+ * kernel keeps for legacy callers, as any FIEMAP_FLAG_SYNC does.
+ *
+ * In XAL_WATCHMODE_NONE, the extents need not describe data written while the file is being
+ * mapped: it can, for example, be in no extent, map as a delayed allocation (XAL_EXTENT_NOADDR),
+ * as unwritten, or to blocks that hold it only once the write reaches them or, for a
+ * copy-on-write, never.
+ *
+ * In XAL_WATCHMODE_REFLINK_SNAPSHOT the FICLONE that precedes the mapping flushes the file and
+ * fails the index on such a failure, once: it clears that error the same way, so the next index
+ * maps the file as XAL_WATCHMODE_NONE does after a failed writeback, except that a range
+ * unwritten in the file is a hole in its clone. Writes after the FICLONE never reach the clone.
+ *
  * When called, any index created from previous calls to xal_index() are cleared.
  *
  * In XAL_WATCHMODE_REFLINK_SNAPSHOT this re-snapshots, and the clones holding the previous

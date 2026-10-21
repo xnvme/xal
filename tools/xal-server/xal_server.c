@@ -13,11 +13,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libxal.h>
 
 #include <xal_server_conf.h>
+
+#define XAL_SERVER_TICK_MS 1
+#define XAL_SERVER_BACKOFF_MAX_MS 1000
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -28,11 +32,26 @@ on_signal(int signo __attribute__((unused)))
 }
 
 /**
- * Per-device context for the watch callback
+ * Per-device context for the watch callback, and for serve_marks() in XAL_WATCHMODE_NONE
  */
 struct xal_server_watch {
 	const struct xal_server_dev *dev;
+	unsigned int backoff_ms; ///< Wait after a failed re-index, doubled on each failure
+	uint64_t retry_ms;       ///< CLOCK_MONOTONIC time at which that wait ends
 };
+
+/**
+ * Milliseconds on CLOCK_MONOTONIC
+ */
+static uint64_t
+now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /**
  * Re-index the device whose filesystem the watcher reports as changed
@@ -54,6 +73,49 @@ on_dirty(struct xal *xal, void *cb_args)
 	}
 
 	syslog(LOG_INFO, "re-indexed %s after a filesystem change", watch->dev->uri);
+}
+
+/**
+ * Re-index each device a reader marked dirty, until one of 'signals' arrives
+ *
+ * In XAL_WATCHMODE_NONE nothing watches the filesystems: a reader that changed one marks the
+ * index with xal_mark_dirty(), and this polls for that mark. The signals are blocked, so
+ * sigtimedwait() takes one that arrived before the wait as well. A failed re-index leaves the
+ * index dirty and is tried again after a wait that doubles on each failure.
+ */
+static void
+serve_marks(unsigned int nxals, struct xal **xals, struct xal_server_watch *watches,
+	    const sigset_t *signals)
+{
+	const struct timespec tick = {.tv_nsec = XAL_SERVER_TICK_MS * 1000000L};
+
+	while (sigtimedwait(signals, NULL, &tick) < 0) {
+		for (unsigned int i = 0; i < nxals; i++) {
+			struct xal_server_watch *watch = &watches[i];
+			int err;
+
+			if (!xal_is_dirty(xals[i]) || now_ms() < watch->retry_ms) {
+				continue;
+			}
+
+			err = xal_index(xals[i]);
+			if (err) {
+				watch->backoff_ms = watch->backoff_ms ? 2 * watch->backoff_ms
+								      : XAL_SERVER_TICK_MS;
+				if (watch->backoff_ms > XAL_SERVER_BACKOFF_MAX_MS) {
+					watch->backoff_ms = XAL_SERVER_BACKOFF_MAX_MS;
+				}
+				watch->retry_ms = now_ms() + watch->backoff_ms;
+				syslog(LOG_ERR, "FAILED: xal_index(%s); err(%d); retried in %u ms",
+				       watch->dev->shm_name, err, watch->backoff_ms);
+				continue;
+			}
+
+			watch->backoff_ms = 0;
+			syslog(LOG_INFO, "re-indexed %s after a reader marked it dirty",
+			       watch->dev->uri);
+		}
+	}
 }
 
 /**
@@ -262,14 +324,20 @@ main(int argc, char **argv)
 
 	syslog(LOG_NOTICE, "serving %u device(s)", conf.ndevs);
 
-	/* An explicitly empty mask rather than the one inherited at startup: a parent that had
-	 * already blocked SIGTERM would otherwise leave this unstoppable short of SIGKILL. */
-	sigemptyset(&waitmask);
+	if (conf.watch_mode == XAL_WATCHMODE_NONE) {
+		serve_marks(npublished, xals, watches, &block);
+	} else {
+		/* An explicitly empty mask rather than the one inherited at startup: a parent that
+		 * had already blocked SIGTERM would otherwise leave this unstoppable short of
+		 * SIGKILL. */
+		sigemptyset(&waitmask);
 
-	/* sigsuspend() installs the given mask and waits atomically, so a signal arriving just
-	 * before the wait cannot be missed. One pending from the publish loop lands here. */
-	while (!g_stop) {
-		sigsuspend(&waitmask);
+		/* sigsuspend() installs the given mask and waits atomically, so a signal arriving
+		 * just before the wait cannot be missed. One pending from the publish loop lands
+		 * here. */
+		while (!g_stop) {
+			sigsuspend(&waitmask);
+		}
 	}
 
 	syslog(LOG_NOTICE, "terminating");
