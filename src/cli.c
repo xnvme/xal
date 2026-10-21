@@ -123,11 +123,19 @@ pp_inode_extents(struct xal *xal, struct xal_inode *inode)
 
 		fofz_begin = (extent->start_offset * blocksize) / 512;
 		fofz_end = fofz_begin + (extent->nblocks * blocksize) / 512 - 1;
+
+		// start_block is no address, so there is no device range to print
+		if (extent->flag & XAL_EXTENT_NOADDR) {
+			printf("- [%" PRIu64 ", %" PRIu64 ", -1, -1, %" PRIu8 "]\n", fofz_begin,
+			       fofz_end, extent->flag);
+			continue;
+		}
+
 		bofz_begin = xal_fsbno_offset(xal, extent->start_block) / 512;
 		bofz_end = bofz_begin + (extent->nblocks * blocksize) / 512 - 1;
 
-		printf("- [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 "]\n", fofz_begin,
-		       fofz_end, bofz_begin, bofz_end);
+		printf("- [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu8 "]\n",
+		       fofz_begin, fofz_end, bofz_begin, bofz_end, extent->flag);
 	}
 
 	return 0;
