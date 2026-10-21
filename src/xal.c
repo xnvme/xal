@@ -1,6 +1,7 @@
+#define _GNU_SOURCE
 #include <asm-generic/errno.h>
 #include <libxnvme.h>
-#define _GNU_SOURCE
+
 #include <assert.h>
 #include <endian.h>
 #include <errno.h>
@@ -13,6 +14,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <xal.h>
 #include <xal_be_fiemap.h>
@@ -112,32 +114,133 @@ xal_close(struct xal *xal)
 	free(xal);
 }
 
+/* Undo the octal escapes the kernel writes for some characters in /proc/self/mountinfo */
+static void
+mountinfo_unescape(char *s)
+{
+	char *out = s;
+
+	for (; *s; ++s) {
+		if (s[0] == '\\' && s[1] >= '0' && s[1] <= '3' && s[2] >= '0' && s[2] <= '7' &&
+		    s[3] >= '0' && s[3] <= '7') {
+			*out++ = (s[1] - '0') << 6 | (s[2] - '0') << 3 | (s[3] - '0');
+			s += 3;
+		} else {
+			*out++ = *s;
+		}
+	}
+	*out = '\0';
+}
+
+/*
+ * Find where the filesystem on dev_uri is mounted. A line of /proc/self/mountinfo reads
+ *   36 35 98:0 / /mnt rw,noatime master:1 - xfs /dev/sda1 rw
+ * A block device is matched by its device number, so another node for it, as /dev/dm-0 for
+ * /dev/mapper/vg-lv, is found too; anything else, and a filesystem with an anonymous device
+ * number such as btrfs, by the mount source. A mount of the filesystem's root wins over a bind
+ * mount of a directory in it. A mount point that is not a directory, or that something else is
+ * mounted over, is skipped. Returns -EINVAL when nothing matches.
+ */
 static int
 retrieve_mountpoint(const char *dev_uri, char *mntpnt)
 {
+	char *line = NULL;
+	bool found = false, found_root = false;
+	int err = -EINVAL, root_err = 0;
+	size_t cap = 0;
+	struct statx stx;
+	struct stat dev;
+	bool isblk;
 	FILE *f;
-	char d[XAL_PATH_MAXLEN + 1], m[XAL_PATH_MAXLEN + 1];
-	bool found = false;
 
-	f = fopen("/proc/mounts", "r");
+	isblk = !stat(dev_uri, &dev) && S_ISBLK(dev.st_mode);
+
+	f = fopen("/proc/self/mountinfo", "re");
 	if (!f) {
-		XAL_DEBUG("FAILED: could not open /proc/mounts; errno(%d)", errno);
+		XAL_DEBUG("FAILED: could not open /proc/self/mountinfo; errno(%d)", errno);
 		return -errno;
 	}
 
-	while (fscanf(f, "%s %s%*[^\n]\n", d, m) == 2) {
-		if (strcmp(d, dev_uri) == 0) {
-			strcpy(mntpnt, m);
+	while (getline(&line, &cap, f) > 0) {
+		char *rest = line, *field[5], *sep, *source;
+		unsigned int maj, min;
+		bool match, root, skip;
+		int i;
+
+		for (i = 0; i < 5; ++i) {
+			field[i] = strsep(&rest, " ");
+			if (!field[i]) {
+				break;
+			}
+		}
+		sep = rest ? strstr(rest, " - ") : NULL;
+		if (i < 5 || !sep || sscanf(field[2], "%u:%u", &maj, &min) != 2) {
+			continue;
+		}
+		rest = sep + 3;
+		strsep(&rest, " ");
+		source = strsep(&rest, " ");
+		if (!source) {
+			continue;
+		}
+		mountinfo_unescape(field[3]);
+		mountinfo_unescape(field[4]);
+		mountinfo_unescape(source);
+
+		if (isblk && maj) {
+			match = makedev(maj, min) == dev.st_rdev;
+		} else {
+			match = !strcmp(source, dev_uri);
+		}
+		if (!match) {
+			continue;
+		}
+		root = !strcmp(field[3], "/");
+		/* ENOENT: hidden under a mount on a parent directory, as if mounted over */
+		if (statx(AT_FDCWD, field[4], AT_NO_AUTOMOUNT, STATX_TYPE | STATX_MNT_ID, &stx)) {
+			if (errno != ENOENT) {
+				err = -errno;
+				root_err = root ? err : root_err;
+			}
+			continue;
+		}
+		if (!S_ISDIR(stx.stx_mode)) {
+			continue;
+		}
+		/* Overmounted: by mount ID, or by device number without STATX_MNT_ID */
+		if (stx.stx_mask & STATX_MNT_ID) {
+			skip = stx.stx_mnt_id != strtoull(field[0], NULL, 10);
+		} else {
+			dev_t at = makedev(stx.stx_dev_major, stx.stx_dev_minor);
+
+			skip = maj && at != makedev(maj, min);
+		}
+		if (skip) {
+			continue;
+		}
+		if (strlen(field[4]) > XAL_PATH_MAXLEN) {
+			err = -ENAMETOOLONG;
+			root_err = root ? err : root_err;
+			continue;
+		}
+		if (!found || root) {
+			strcpy(mntpnt, field[4]);
 			found = true;
+			found_root = root;
+		}
+		if (root) {
 			break;
 		}
 	}
 
+	free(line);
 	fclose(f);
 
-	if (!found) {
-		XAL_DEBUG("FAILED: device(%s) not mounted", dev_uri);
-		return -EINVAL;
+	/* A bind mount is not taken for a root mount that could not be */
+	if (!found || (!found_root && root_err)) {
+		err = found ? root_err : err;
+		XAL_DEBUG("FAILED: no mount found for device(%s); err(%d)", dev_uri, err);
+		return err;
 	}
 
 	return 0;
@@ -314,6 +417,10 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 	if (!opts->be) {
 		if (!strlen(mountpoint)) {
 			err = retrieve_mountpoint(ident->uri, mountpoint);
+			if (err && err != -EINVAL) {
+				XAL_DEBUG("FAILED: retrieve_mountpoint(); err(%d)", err);
+				return err;
+			}
 			if (err) {
 				XAL_DEBUG("INFO: Failed retrieve_mountpoint(), this is OK, setting backend to XFS");
 				opts->be = XAL_BACKEND_XFS;
@@ -376,7 +483,8 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 		fidx += ns->flbas.format_msb << 4;
 	}
 
-	(*xal)->sb.lba_blksze = 1U << ns->lbaf[fidx].ds;
+	/* Left 0, so that xal_extent_in_lba() fails, when xNVMe could not identify the device */
+	(*xal)->sb.lba_blksze = ns->lbaf[fidx].ds ? 1U << ns->lbaf[fidx].ds : 0;
 
 	if (opts->shm_name) {
 		err = publish_shared_state(*xal, opts->shm_name, mountpoint, opts->be);
@@ -722,6 +830,7 @@ xal_from_shm(const char *shm_name, struct xal **out)
 		struct xal_be_xfs *be = (struct xal_be_xfs *)&xal->be;
 		be->base.type = XAL_BACKEND_XFS;
 		be->base.close = xal_be_xfs_close;
+		be->bdev_fd = -1;
 	}
 
 	*out = xal;

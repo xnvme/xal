@@ -12,7 +12,7 @@ log_level = 2
 #
 # and optionally:
 #
-#   mountpoint where the device is mounted. Looked up in /proc/mounts when omitted.
+#   mountpoint where the device is mounted. Looked up in /proc/self/mountinfo when omitted.
 #   subtree    an absolute path at or under the mountpoint to restrict the index to.
 #
 # Example:

@@ -175,7 +175,7 @@ struct xal_sb {
 	uint8_t agblklog;      ///< log2 of 'agblocks' (rounded up)
 	uint32_t agcount;      ///< Number of allocation groups
 	uint32_t dirblocksize; ///< Size of a directory block, in bytes
-	uint32_t lba_blksze;   ///< LBA block size
+	uint32_t lba_blksze;   ///< LBA block size; 0 when xNVMe could not identify the device
 };
 
 /**
@@ -307,6 +307,23 @@ xal_pp(struct xal *xal);
  * opts->be is in/out: left zero it is filled in with the detected backend and stays set. A caller
  * reusing one struct xal_opts across devices must clear it between calls.
  *
+ * Left zero, opts->be is XAL_BACKEND_FIEMAP when the filesystem on dev is mounted and
+ * XAL_BACKEND_XFS when it is not. The mount is looked up in /proc/self/mountinfo: a block device
+ * by its device number, unless the filesystem reports an anonymous one, as btrfs does; anything
+ * else by the mount source. A mount of the filesystem's root wins over a bind mount, and mount
+ * points that are not directories or have something mounted over them are skipped. When the
+ * lookup fails otherwise than by finding nothing, as with a mount point longer than
+ * XAL_PATH_MAXLEN (-ENAMETOOLONG), that error is returned, also when only a bind mount was found
+ * besides. sb.lba_blksze is left 0, and xal_extent_in_lba() fails, when xNVMe could not identify
+ * dev; for a block device that is not NVMe it identifies by the name the URI ends in, so such a
+ * device must be named as the kernel names it.
+ *
+ * XAL_BACKEND_XFS opens a block device with O_EXCL until xal_close(), as mount does, and returns
+ * -EBUSY while it is mounted, claimed otherwise (by dm, md or swap, or for a whole disk through
+ * one of its partitions, and the other way round), or held by another handle with this backend;
+ * meanwhile it cannot be mounted. Other writers are not stopped, and character devices and image
+ * files are not claimed.
+ *
  * With XAL_BACKEND_FIEMAP, the mountpoint and opts->subtree must be directories, not symlinks to
  * one; -ENOTDIR is returned otherwise. A subtree on another filesystem than the mountpoint is
  * rejected with -EXDEV, and a mountpoint of / with -EINVAL. The filesystem must stay mounted for
@@ -327,7 +344,8 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts);
  * As xal_open(), but with no xnvme device. FIEMAP is then the only reachable backend, and
  * sb.lba_blksze is left unset, so xal_extent_in_lba() returns -EINVAL on the resulting handle.
  *
- * @param uri The device to index; it must be mounted, unless opts->mountpoint says where
+ * @param uri The device to index; it must be mounted, unless opts->mountpoint says where. Its
+ * mount is looked up as by xal_open().
  * @param xal Pointer
  * @param opts Pointer to options, see xal_opts
  *

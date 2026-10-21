@@ -66,6 +66,7 @@ xal_pp(struct xal *xal)
 	wrtn += printf("  sb.agblklog: %" PRIu8 "\n", xal->sb.agblklog);
 	wrtn += printf("  sb.agcount: %" PRIu32 "\n", xal->sb.agcount);
 	wrtn += printf("  sb.dirblocksize: %" PRIu32 "\n", xal->sb.dirblocksize);
+	wrtn += printf("  sb.lba_blksze: %" PRIu32 "\n", xal->sb.lba_blksze);
 
 	switch (be->type) {
 		case XAL_BACKEND_XFS:
