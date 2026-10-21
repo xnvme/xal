@@ -98,11 +98,41 @@ struct xal_opts {
 	const char *subtree;
 };
 
+/**
+ * Bits of xal_extent.flag. They describe the blocks an extent names, and an extent with none of
+ * them set holds the file's data in those blocks. After a failed writeback of the file, or a
+ * write to it while it was mapped, the extents need not describe the file's data, whatever the
+ * bits say; see xal_index().
+ *
+ * The FIEMAP backend reports all of them. The XFS backend reads the on-disk extent record, which
+ * holds only the unwritten state: from it, a clear XAL_EXTENT_SHARED means unknown rather than
+ * unshared, and delayed allocations exist only in memory.
+ *
+ * In XAL_WATCHMODE_REFLINK_SNAPSHOT the extents are those of xal's clones, which hold only the
+ * written blocks of their origins: an extent then carries XAL_EXTENT_SHARED while any other file,
+ * normally the origin, still shares its blocks, so the bit says nothing about the origin, and the
+ * origin's unwritten ranges are holes.
+ */
+enum xal_extent_flag {
+	/** Allocated but never written: the filesystem reads it as zeros, while the blocks hold
+	 *  whatever they held before. */
+	XAL_EXTENT_UNWRITTEN = 1 << 0,
+
+	/** The blocks are shared with another file, as after a reflink: writing them in place
+	 *  changes that file too. */
+	XAL_EXTENT_SHARED = 1 << 1,
+
+	/** start_block is no address the file's data can be read or written at raw: a delayed
+	 *  allocation, data whose location the filesystem does not report, or data it keeps
+	 *  inline, packed into a tail, unaligned, encoded or encrypted. */
+	XAL_EXTENT_NOADDR = 1 << 2,
+};
+
 struct xal_extent {
 	uint64_t start_offset;
 	uint64_t start_block;
 	uint64_t nblocks;
-	uint8_t flag;
+	uint8_t flag; ///< Bits of enum xal_extent_flag
 } __attribute__((packed));
 
 int
@@ -373,8 +403,9 @@ xal_dinodes_retrieve(struct xal *xal);
  * kernel keeps for legacy callers, as any FIEMAP_FLAG_SYNC does.
  *
  * In XAL_WATCHMODE_NONE, the extents need not describe data written while the file is being
- * mapped: it can, for example, be in no extent, map as a delayed allocation, as unwritten, or to
- * blocks that hold it only once the write reaches them or, for a copy-on-write, never.
+ * mapped: it can, for example, be in no extent, map as a delayed allocation (XAL_EXTENT_NOADDR),
+ * as unwritten, or to blocks that hold it only once the write reaches them or, for a
+ * copy-on-write, never.
  *
  * In XAL_WATCHMODE_REFLINK_SNAPSHOT the FICLONE that precedes the mapping flushes the file and
  * fails the index on such a failure, once: it clears that error the same way, so the next index

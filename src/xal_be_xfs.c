@@ -560,7 +560,8 @@ decode_xfs_extent(uint64_t l0, uint64_t l1, struct xal_extent *extent)
 	// Extract block count (l1:0-20)
 	extent->nblocks = l1 & 0x1FFFFF;
 
-	extent->flag = l1 >> 63;
+	// Extract the extent flag (l0:63), set when the extent is unwritten
+	extent->flag = (l0 >> 63) ? XAL_EXTENT_UNWRITTEN : 0;
 }
 
 /**

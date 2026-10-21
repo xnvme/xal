@@ -987,6 +987,31 @@ read_fiemap(int fd, struct fiemap **fiemap_ptr)
 	return -EAGAIN;
 }
 
+/**
+ * Translate the flags of a FIEMAP extent to the bits of enum xal_extent_flag
+ */
+static uint8_t
+fiemap_extent_flag(uint32_t fe_flags)
+{
+	const uint32_t noaddr = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC |
+				FIEMAP_EXTENT_ENCODED | FIEMAP_EXTENT_DATA_ENCRYPTED |
+				FIEMAP_EXTENT_NOT_ALIGNED | FIEMAP_EXTENT_DATA_INLINE |
+				FIEMAP_EXTENT_DATA_TAIL;
+	uint8_t flag = 0;
+
+	if (fe_flags & FIEMAP_EXTENT_UNWRITTEN) {
+		flag |= XAL_EXTENT_UNWRITTEN;
+	}
+	if (fe_flags & FIEMAP_EXTENT_SHARED) {
+		flag |= XAL_EXTENT_SHARED;
+	}
+	if (fe_flags & noaddr) {
+		flag |= XAL_EXTENT_NOADDR;
+	}
+
+	return flag;
+}
+
 static int
 xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *inode)
 {
@@ -1062,7 +1087,7 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 			extent->start_offset = fiemap->fm_extents[i].fe_logical / xal->sb.blocksize;
 			extent->start_block  = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize;
 			extent->nblocks      = fiemap->fm_extents[i].fe_length / xal->sb.blocksize;
-			extent->flag         = fiemap->fm_extents[i].fe_flags;
+			extent->flag         = fiemap_extent_flag(fiemap->fm_extents[i].fe_flags);
 		}
 	}
 
