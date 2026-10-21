@@ -879,6 +879,10 @@ xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal
 		XAL_DEBUG("FAILED: no extent given");
 		return -EINVAL;
 	}
+	if (extent->flag & XAL_EXTENT_NOADDR) {
+		XAL_DEBUG("FAILED: extent has no device address");
+		return -ENODATA;
+	}
 
 	output->start_offset = extent->start_offset * xal->sb.blocksize;
 	output->size = extent->nblocks * xal->sb.blocksize;
@@ -901,6 +905,10 @@ xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_e
 	if (!lba_blksze) {
 		XAL_DEBUG("SKIPPED: cannot convert to lba without lba blksze");
 		return -EINVAL;
+	}
+	if (extent->flag & XAL_EXTENT_NOADDR) {
+		XAL_DEBUG("FAILED: extent has no device address");
+		return -ENODATA;
 	}
 
 	output->start_offset = extent->start_offset * xal->sb.blocksize / lba_blksze;

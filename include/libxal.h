@@ -240,7 +240,8 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode);
  * @param extent A pointer to a `xal_extent`
  * @param output A pointer to the output of the conversion
  *
- * @return On success a 0 is returned. On error, negative errno is returned to indicate the error.
+ * @return On success a 0 is returned. On error, negative errno is returned to indicate the error:
+ *         -ENODATA for an extent with XAL_EXTENT_NOADDR set, whose start_block is no address.
  */
 int
 xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
@@ -252,7 +253,8 @@ xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal
  * @param extent A pointer to a `xal_extent`
  * @param output A pointer to the output of the conversion
  *
- * @return On success a 0 is returned. On error, negative errno is returned to indicate the error.
+ * @return On success a 0 is returned. On error, negative errno is returned to indicate the error:
+ *         -ENODATA for an extent with XAL_EXTENT_NOADDR set, whose start_block is no address.
  */
 int
 xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
