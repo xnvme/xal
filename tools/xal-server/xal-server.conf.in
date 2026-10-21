@@ -27,7 +27,8 @@ devices = []
 #
 #   none              nothing is watched and nothing is pinned. The published extents are a
 #                     snapshot of the filesystem as it was at index time and a foreign write can
-#                     invalidate them at any point. For a deployment that owns the filesystem.
+#                     invalidate them at any point. For a deployment that owns the filesystem:
+#                     a reader that changes it calls xal_mark_dirty() to have it re-indexed.
 #   reflink snapshot  every indexed file is cloned into a shadow directory, so the blocks stay
 #                     pinned and readers keep valid LBAs under foreign writes. Needs an XFS
 #                     mount made with reflink=1, and CAP_LINUX_IMMUTABLE to protect the clones.
