@@ -217,6 +217,13 @@ publish_shared_state(struct xal *xal, const char *shm_name, const char *mountpoi
 			strncpy(state->subtree, fiemap_be->subtree, XAL_PATH_MAXLEN - 1);
 			state->subtree[XAL_PATH_MAXLEN - 1] = '\0';
 		}
+	} else if (be == XAL_BACKEND_XFS) {
+		struct xal_be_xfs *xfs_be = (struct xal_be_xfs *)&xal->be;
+
+		if (xfs_be->tree && xfs_be->tree->subtree) {
+			strncpy(state->subtree, xfs_be->tree->subtree, XAL_PATH_MAXLEN - 1);
+			state->subtree[XAL_PATH_MAXLEN - 1] = '\0';
+		}
 	}
 
 	atomic_store_explicit(&state->magic, XAL_SHM_MAGIC, memory_order_release);
@@ -722,6 +729,21 @@ xal_from_shm(const char *shm_name, struct xal **out)
 		struct xal_be_xfs *be = (struct xal_be_xfs *)&xal->be;
 		be->base.type = XAL_BACKEND_XFS;
 		be->base.close = xal_be_xfs_close;
+
+		be->tree = calloc(1, sizeof(*be->tree));
+		if (!be->tree) {
+			err = -ENOMEM;
+			goto unmap_extents;
+		}
+		be->tree->root_ino = state->sb.rootino;
+		if (strlen(state->subtree)) {
+			be->tree->subtree = strdup(state->subtree);
+			if (!be->tree->subtree) {
+				free(be->tree);
+				err = -ENOMEM;
+				goto unmap_extents;
+			}
+		}
 	}
 
 	*out = xal;
@@ -809,6 +831,10 @@ xal_inode_path(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_n
 		struct xal_be_fiemap *fiemap_be = (struct xal_be_fiemap *)&xal->be;
 
 		basepath = fiemap_be->subtree ? fiemap_be->subtree : fiemap_be->mountpoint;
+	} else if (be->type == XAL_BACKEND_XFS) {
+		struct xal_be_xfs *xfs_be = (struct xal_be_xfs *)&xal->be;
+
+		basepath = xfs_be->tree && xfs_be->tree->subtree ? xfs_be->tree->subtree : "";
 	}
 
 	nbytes = strlen(basepath);
@@ -946,6 +972,12 @@ search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *b
 		return -EINVAL;
 	}
 
+	/* "/data/train2/x" is not beneath "/data/train" */
+	if (path[basepath_len] != '/') {
+		XAL_DEBUG("FAILED: Not a valid path(%s); not beneath(%s)", path, basepath);
+		return -EINVAL;
+	}
+
 	search = root;
 	search_begin = path + basepath_len + 1;
 	search_end = strchr(search_begin, '/');
@@ -1031,13 +1063,18 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode)
 	be = (struct xal_backend_base *)&xal->be;
 
 	switch (be->type) {
-	case XAL_BACKEND_XFS:
+	case XAL_BACKEND_XFS: {
+		struct xal_be_xfs *xfs_be = (struct xal_be_xfs *)&xal->be;
+
 		root = xal_inode_at(xal, xal->root_idx);
 		if (!root) {
 			XAL_DEBUG("FAILED: root index out of range; index rewritten under us");
 			return -ESTALE;
 		}
-		return search_by_traversal(xal, root, path, "", inode);
+		return search_by_traversal(
+		    xal, root, path,
+		    xfs_be->tree && xfs_be->tree->subtree ? xfs_be->tree->subtree : "", inode);
+	}
 	case XAL_BACKEND_FIEMAP:
 		return xal_be_fiemap_get_inode(xal, path, inode);
 	default:

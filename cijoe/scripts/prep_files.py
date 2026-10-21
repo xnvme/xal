@@ -182,6 +182,26 @@ def provoke_odf_file_fmt_btree(args: Namespace, cijoe: Cijoe) -> int:
     return 0
 
 
+def provoke_nested_dirs(args: Namespace, cijoe: Cijoe) -> int:
+    """
+    Directories three levels deep, for indexing a subtree that is not at the root and has
+    directories of its own: shortform, single-block and multi-block ones. Also a directory in a
+    multi-block and in a btree-format directory, made after the files there, so that looking the
+    subtree up goes through their data blocks.
+    """
+
+    base = args.mountpoint / "nested"
+    for sub, count in [("a", 3), ("a/b", 3), ("a/b/c", 40), ("a/d", 600), ("e", 2)]:
+        if err := create_directory_with_urandom_content(args, cijoe, base / sub, count, "4K"):
+            return err
+    for parent in ["should-be-dir-fmt_extents-more", "intent_iab3_lvl1"]:
+        path = args.mountpoint / parent / "zz-sub"
+        if err := create_directory_with_urandom_content(args, cijoe, path, 3, "4K"):
+            return err
+
+    return 0
+
+
 def provoke_odf_iabt_lvl0(args: Namespace, cijoe: Cijoe) -> int:
     """
     This is the base to use when trying to provoke different layout for the
@@ -230,6 +250,9 @@ def populate(args, cijoe) -> int:
         return err
 
     if err := provoke_odf_file_fmt_btree(args, cijoe):
+        return err
+
+    if err := provoke_nested_dirs(args, cijoe):
         return err
 
     return 0

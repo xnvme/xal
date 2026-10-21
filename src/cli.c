@@ -25,6 +25,8 @@ struct xal_cli_args {
 	char *backend;
 	char *dev_uri;
 	char *filename;
+	char *subtree;
+	char *index_file;
 };
 
 struct xal_nodeinspector_args {
@@ -64,6 +66,20 @@ parse_args(int argc, char *argv[], struct xal_cli_args *args)
 				return -EINVAL;
 			}
 			args->filename = argv[++i];
+		} else if (strcmp(argv[i], "--subtree") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Error: Subtree argument must define a path: "
+						"--subtree <path>\n");
+				return -EINVAL;
+			}
+			args->subtree = argv[++i];
+		} else if (strcmp(argv[i], "--index-file") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Error: Index file argument must define a path: "
+						"--index-file <path>\n");
+				return -EINVAL;
+			}
+			args->index_file = argv[++i];
 		} else if (args->dev_uri == NULL) {
 			args->dev_uri = argv[i];
 		} else {
@@ -208,6 +224,8 @@ main(int argc, char *argv[])
 		opts.file_lookupmode = XAL_FILE_LOOKUPMODE_HASHMAP;
 	}
 
+	opts.subtree = args.subtree;
+
 	err = xal_open(dev, &xal, &opts);
 	if (err < 0) {
 		printf("xal_open(...); err(%d)\n", err);
@@ -218,16 +236,28 @@ main(int argc, char *argv[])
 		xal_pp(xal);
 	}
 
-	err = xal_dinodes_retrieve(xal);
-	if (err) {
-		printf("xal_dinodes_retrieve(...); err(%d)\n", err);
-		return err;
+	/* With --index-file, read the index saved there, or index and save it when that fails */
+	err = args.index_file ? xal_index_load(xal, args.index_file) : -ENOENT;
+	if (args.index_file) {
+		fprintf(stderr, "xal_index_load(%s); err(%d)\n", args.index_file, err);
 	}
-
-	err = xal_index(xal);
 	if (err) {
-		printf("xal_index(...); err(%d)\n", err);
-		goto exit;
+		err = xal_dinodes_retrieve(xal);
+		if (err) {
+			printf("xal_dinodes_retrieve(...); err(%d)\n", err);
+			return err;
+		}
+
+		err = xal_index(xal);
+		if (err) {
+			printf("xal_index(...); err(%d)\n", err);
+			goto exit;
+		}
+
+		if (args.index_file) {
+			fprintf(stderr, "xal_index_save(%s); err(%d)\n", args.index_file,
+				xal_index_save(xal, args.index_file));
+		}
 	}
 
 	if (args.bmap) {

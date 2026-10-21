@@ -57,6 +57,9 @@ typedef struct {
  */
 #define XAL_ODF_LABEL_MAX 12
 
+#define XAL_ODF_SB_VERSION_NUMBITS 0x000f
+#define XAL_ODF_SB_VERSION_5 5
+
 #define XAL_ODF_AGF_MAGIC 0x58414746  /* 'XAGF' */
 #define XAL_ODF_AGI_MAGIC 0x58414749  /* 'XAGI' */
 #define XAL_ODF_AGFL_MAGIC 0x5841464c /* 'XAFL' */
@@ -74,6 +77,29 @@ typedef struct {
 #define XAL_ODF_BMAP_CRC_MAGIC 0x424d4133 /* B+Tree Extent List, v5 only */
 
 /**
+ * The internal log, in basic blocks of XAL_ODF_LOG_BBSIZE bytes, each stamped with the cycle it
+ * was written in: in its first word, or in the second of a record header, whose first word is
+ * XAL_ODF_LOG_HEADER_MAGIC
+ */
+#define XAL_ODF_LOG_BBSIZE 512
+#define XAL_ODF_LOG_HEADER_MAGIC 0xFEEDbabe
+#define XAL_ODF_LOG_VERSION_2 2
+#define XAL_ODF_LOG_HEADER_CYCLE_SIZE (32 * 1024) ///< Bytes of a record a header block covers
+#define XAL_ODF_LOG_UNMOUNT_TRANS 0x20		  ///< xlog_op_header.oh_flags of an unmount record
+
+/* Byte offsets of the fields of a log record header (xlog_rec_header) */
+#define XAL_ODF_LOG_H_CYCLE 4
+#define XAL_ODF_LOG_H_VERSION 8
+#define XAL_ODF_LOG_H_LEN 12
+#define XAL_ODF_LOG_H_LSN 16
+#define XAL_ODF_LOG_H_CRC 32
+#define XAL_ODF_LOG_H_NUM_LOGOPS 40
+#define XAL_ODF_LOG_H_CYCLE_DATA 44 ///< The first word of each data block, in its place
+#define XAL_ODF_LOG_H_FS_UUID 304
+#define XAL_ODF_LOG_H_SIZE 320
+#define XAL_ODF_LOG_OH_FLAGS 9 ///< Of the operation header that starts a record's data
+
+/**
  * The XFS Superblock on-disk representation in v5 format
  */
 struct xal_odf_sb {
@@ -84,7 +110,7 @@ struct xal_odf_sb {
 
 	uuid_t sb_uuid; ///< User-visible file system unique id
 
-	uint8_t _reserved_2[8];
+	uint64_t logstart; ///< starting block of log if internal, 0 if external
 
 	uint64_t rootino; ///< root inode number
 
@@ -93,7 +119,11 @@ struct xal_odf_sb {
 	xfs_agblock_t agblocks; ///< size of an allocation group
 	xfs_agnumber_t agcount; ///< number of allocation groups
 
-	uint8_t _reserved_4[10];
+	uint8_t _reserved_4[4];
+
+	uint32_t logblocks; ///< number of log blocks
+
+	uint16_t versionnum; ///< header version, XAL_ODF_SB_VERSION_5 in its low bits
 
 	uint16_t sectsize;  ///< volume sector size, bytes
 	uint16_t inodesize; ///< inode size, bytes

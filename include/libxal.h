@@ -92,9 +92,13 @@ struct xal_opts {
 	 *  xal_from_shm() for attaching to the pools from another process. */
 	const char *shm_name;
 
-	/** FIEMAP backend only: absolute path at or under the mountpoint to scope the index to.
-	 *  Only files beneath it are indexed, and in XAL_WATCHMODE_REFLINK_SNAPSHOT only those
-	 *  are reflinked. NULL or empty indexes the whole mount. Ignored by the XFS backend. */
+	/** Directory to scope the index to; only files beneath it are indexed, and the index is
+	 *  rooted at it. NULL or empty indexes the whole filesystem. With the FIEMAP backend it is
+	 *  an absolute path at or under the mountpoint, and in XAL_WATCHMODE_REFLINK_SNAPSHOT only
+	 *  the files beneath it are reflinked. With the XFS backend it is an absolute path from the
+	 *  root of the filesystem, such as "/data/train", without '.' or '..' components, and a
+	 *  symlink in it is not followed. xal_open() picks the backend by whether the device is
+	 *  mounted, so set opts.be along with a subtree meant for one of them. */
 	const char *subtree;
 };
 
@@ -312,6 +316,10 @@ xal_pp(struct xal *xal);
  * rejected with -EXDEV, and a mountpoint of / with -EINVAL. The filesystem must stay mounted for
  * as long as the handle is open.
  *
+ * With XAL_BACKEND_XFS, a relative opts->subtree or one with a '.' or '..' component is rejected
+ * with -EINVAL, and one of XAL_PATH_MAXLEN bytes or more with -ENAMETOOLONG; it is looked up by
+ * xal_dinodes_retrieve().
+ *
  * @param dev Pointer to xnvme device handled as retrieved with xnvme_dev_open()
  * @param xal Pointer
  * @param opts Pointer to options, see xal_opts
@@ -346,6 +354,24 @@ xal_close(struct xal *xal);
  * from xal_from_shm(). This holds for both backends, also XAL_BACKEND_FIEMAP where the call
  * otherwise does nothing.
  *
+ * With XAL_BACKEND_XFS the inode chunks are read through a temporary xNVMe queue on the device, in
+ * reads of up to 128 KiB, or the device's MDTS when smaller, merged across small holes, up to 32 of
+ * them submitted at once into one buffer of up to 4 MiB from xnvme_buf_alloc(). How many are in
+ * flight is up to the device's async interface; without a queue or such a buffer they are read one
+ * at a time.
+ *
+ * With XAL_BACKEND_XFS and opts->subtree, the subtree is looked up from the root directory, and
+ * -ENOENT is returned when a component of it is not there, -ENOTDIR when one is not a directory
+ * (a symlink included), -ENOSYS when one is a btree directory above level 1 as for xal_index(),
+ * and -EUCLEAN when one is not consistent.
+ * Then only the inodes beneath it are read, without the inode btrees: level by level, the blocks
+ * of the directories, then the inodes their entries name, the same way. xal_index() reads any
+ * the levels did not, as it gets to them.
+ *
+ * -EBUSY is returned while xal_index(), xal_index_save() or xal_index_load() runs on the handle.
+ * -EUCLEAN is returned for inode btree records out of bounds or order, and -EOPNOTSUPP for a
+ * filesystem with more inodes in a block than in a chunk (64).
+ *
  * @param xal Pointer to the xal
  *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
@@ -358,6 +384,10 @@ xal_dinodes_retrieve(struct xal *xal);
  *
  * Assumes that you have retrieved all the inodes from disk via xal_dinodes_retrieve() if opened with
  * backend XAL_BACKEND_XFS.
+ *
+ * With XAL_BACKEND_XFS the blocks of every directory are read ahead the way xal_dinodes_retrieve()
+ * reads the inode chunks, before the previous index is cleared, and held in memory until this
+ * returns; when that fails, the walk reads them one at a time instead.
  *
  * Only directories and regular files are indexed; symlinks and special files are skipped, and so
  * is anything mounted inside the tree with XAL_BACKEND_FIEMAP. That backend also checks the
@@ -373,7 +403,8 @@ xal_dinodes_retrieve(struct xal *xal);
  * way to.
  *
  * Takes exactly one caller at a time. A second concurrent call on the same handle returns
- * -EBUSY rather than interleaving, and the watch callback installed by xal_watch_filesystem()
+ * -EBUSY rather than interleaving, as does a call while xal_dinodes_retrieve(), xal_index_save()
+ * or xal_index_load() runs on it, and the watch callback installed by xal_watch_filesystem()
  * counts as a caller: a caller that re-indexes from its own thread as well should expect one of
  * the two to be refused. Interleaved indexes are not merely wasteful -- they can produce extents
  * that were never a file's, from a call that reports success.
@@ -388,6 +419,62 @@ xal_dinodes_retrieve(struct xal *xal);
  */
 int
 xal_index(struct xal *xal);
+
+/**
+ * Write the index to the file at 'path', for xal_index_load() to read back
+ *
+ * XAL_BACKEND_XFS only. The file is written next to 'path' with mode 0600, as it names every file
+ * on the filesystem, synced, and renamed over 'path'. It holds the inode and extent pools and a
+ * key of the filesystem's state: the UUID, the LSN and CRC of the unmount record at the head of
+ * the log, and a hash of the superblock and the AG headers.
+ *
+ * Any mount of the device, read-only ones included, rewrites the superblock and writes a new
+ * unmount record when it is unmounted, unless it used -o norecovery or the block device was
+ * read-only. So the key changes with any change made through the filesystem, and also with a
+ * mount that changed nothing; after a crash the log is not clean. Offline tools are seen only
+ * when they write the superblock or an AG header: xfs_admin does, and xfs_repair usually
+ * rewrites the AG headers. Writes to inodes or directory blocks with xfs_db -x or to the raw
+ * device are not seen. Only v5 filesystems with an internal log are supported. The file is in
+ * the host's byte order; a host of the other order refuses it.
+ *
+ * The superblock and the AG headers must still be as xal_open() read them; -ESTALE otherwise, as
+ * the inodes may have been read after a change.
+ *
+ * @param xal Pointer to the xal, indexed
+ * @param path Path of the file to write
+ *
+ * @returns On success, 0 is returned. -ESTALE is returned when the filesystem changed since its
+ * inodes were read or the log cannot be read as clean, -EUCLEAN when the log is not clean,
+ * -ENODATA when its last record is the one xfsprogs writes when it formats a log (mkfs,
+ * xfs_repair -L; mount and unmount the filesystem once), -EOPNOTSUPP for an external log or a
+ * filesystem older than v5, -EBUSY while xal_dinodes_retrieve(), xal_index() or
+ * xal_index_load() runs, -EINVAL without an index; other negative errno on error.
+ */
+int
+xal_index_save(struct xal *xal, const char *path);
+
+/**
+ * Read an index written by xal_index_save() in place of xal_dinodes_retrieve() and xal_index()
+ *
+ * XAL_BACKEND_XFS only. The file must be a regular file owned by the effective user and not
+ * writable by group or others, and must not be a symlink. The key in it is compared with the
+ * filesystem's state read from the device now, and the subtree with the handle's opts.subtree.
+ * On success the index is as after xal_index(), and the inodes of an earlier
+ * xal_dinodes_retrieve() are dropped, so a later xal_index() needs xal_dinodes_retrieve() first.
+ * When the file is refused, the handle's index is left as it was; on an error after the key
+ * matched, such as pools that turn out damaged (-EPROTO), the handle has no index.
+ *
+ * @param xal Pointer to the xal, opened on the device
+ * @param path Path of the file to read
+ *
+ * @returns On success, 0 is returned. -ESTALE is returned when the filesystem or the subtree
+ * differs from the one saved, or the filesystem changed since xal_open() (open it again),
+ * -EUCLEAN, -ENODATA and -EOPNOTSUPP as for xal_index_save(), -EPERM for a file others can
+ * write, -EPROTO for a file this build does not read or a damaged one, -EBUSY while
+ * xal_dinodes_retrieve(), xal_index() or xal_index_save() runs; other negative errno on error.
+ */
+int
+xal_index_load(struct xal *xal, const char *path);
 
 /**
  * Callback invoked by the background watch thread when it observes the xal struct becoming

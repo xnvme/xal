@@ -20,7 +20,7 @@ struct xal_be_fiemap {
 
 	struct xal_reflink *reflink; ///< Reflink-snapshot state; non-NULL in XAL_WATCHMODE_REFLINK_SNAPSHOT
 
-	uint8_t _rsvd[8];
+	uint8_t _rsvd[16];
 };
 XAL_STATIC_ASSERT(sizeof(struct xal_be_fiemap) == XAL_BACKEND_SIZE, "Incorrect size");
 

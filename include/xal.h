@@ -11,7 +11,7 @@
 #define ODF_BLOCK_DIR_BYTES_MAX 64UL * 1024 ///< Maximum size of a directory block
 #define ODF_BLOCK_FS_BYTES_MAX 64UL * 1024  ///< Maximum size of a filestem block
 #define ODF_INODE_MAX_NBYTES 2048	    ///< Maximum size of an inode
-#define XAL_BACKEND_SIZE 72
+#define XAL_BACKEND_SIZE 80
 
 struct xal_backend_base {
 	enum xal_backend type;
@@ -39,7 +39,7 @@ enum xal_state {
  * contents mean: changing xal_inode.name from an assembled path to a leaf name leaves every size
  * and offset intact and still requires a bump.
  */
-#define XAL_SHM_VERSION 2
+#define XAL_SHM_VERSION 3
 
 struct xal_shared_state {
 	_Atomic uint64_t magic; ///< XAL_SHM_MAGIC, stored last, so zero means not yet published

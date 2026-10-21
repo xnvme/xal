@@ -26,4 +26,15 @@ xal_test_shm_version_exe = executable(
   install: true,
 )
 
+# Installed for the cijoe suite, as xal_test_shm_version is.
+xal_test_index_save_exe = executable(
+  'xal_test_index_save',
+  'test_index_save.c',
+  dependencies: xallib_deps,
+  link_with: xal_library,
+  include_directories: include_dirs,
+  install_rpath: xallib_rpath,
+  install: true,
+)
+
 subdir('xal-server')
