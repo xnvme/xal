@@ -362,7 +362,25 @@ xal_dinodes_retrieve(struct xal *xal);
  * Only directories and regular files are indexed; symlinks and special files are skipped, and so
  * is anything mounted inside the tree with XAL_BACKEND_FIEMAP. That backend also checks the
  * mountpoint and opts->subtree again, as xal_open() does.
- * 
+ *
+ * XAL_BACKEND_FIEMAP writes each file's dirty data back before mapping it, so delayed allocations
+ * map to the blocks they got. When a writeback of the file failed, then or earlier, that flush
+ * still writes the file back but then reports the failure, which says nothing about the mapping:
+ * in XAL_WATCHMODE_NONE the file is then mapped again without it instead of failing the index.
+ * Its extents describe its blocks, which for the range that failed need not hold what the page
+ * cache does: that range maps as a hole, as unwritten, or as blocks still holding the data from
+ * before. fsync() on the file still reports the failure; the flush clears only the error the
+ * kernel keeps for legacy callers, as any FIEMAP_FLAG_SYNC does.
+ *
+ * In XAL_WATCHMODE_NONE, the extents need not describe data written while the file is being
+ * mapped: it can, for example, be in no extent, map as a delayed allocation, as unwritten, or to
+ * blocks that hold it only once the write reaches them or, for a copy-on-write, never.
+ *
+ * In XAL_WATCHMODE_REFLINK_SNAPSHOT the FICLONE that precedes the mapping flushes the file and
+ * fails the index on such a failure, once: it clears that error the same way, so the next index
+ * maps the file as XAL_WATCHMODE_NONE does after a failed writeback, except that a range
+ * unwritten in the file is a hole in its clone. Writes after the FICLONE never reach the clone.
+ *
  * When called, any index created from previous calls to xal_index() are cleared.
  *
  * In XAL_WATCHMODE_REFLINK_SNAPSHOT this re-snapshots, and the clones holding the previous

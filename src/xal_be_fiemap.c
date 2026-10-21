@@ -888,11 +888,48 @@ exit:
 	return err;
 }
 
+/**
+ * Run FS_IOC_FIEMAP, with FIEMAP_FLAG_SYNC when 'sync' is set
+ *
+ * When a writeback of the file failed, then or earlier, the flush still writes the file back but
+ * then fails the ioctl with that error, which the kernel reports once, to the first caller that
+ * flushes. It says nothing about the mapping, so on any error the ioctl is run again without the
+ * flag, and an error that is not the flush's fails that run too; see xal_index() for what the
+ * extents then mean.
+ */
+static int
+fiemap_ioctl(int fd, struct fiemap *fiemap, bool sync)
+{
+	fiemap->fm_flags = sync ? FIEMAP_FLAG_SYNC : 0;
+	if (!ioctl(fd, FS_IOC_FIEMAP, fiemap)) {
+		return 0;
+	}
+
+	if (sync) {
+		XAL_DEBUG("INFO: fiemap ioctl() with the flush failed; errno(%d); mapping without it",
+			  errno);
+		fiemap->fm_flags = 0;
+		if (!ioctl(fd, FS_IOC_FIEMAP, fiemap)) {
+			return 0;
+		}
+	}
+
+	XAL_DEBUG("FAILED: fiemap ioctl(); errno(%d)", errno);
+	return -errno;
+}
+
 /*
  * Two ioctls: the first, with fm_extent_count 0, reports how many extents the file has; the
  * fiemap is then reallocated to fit and the ioctl re-run to read them. A file with no extents
  * stops after the first, as the second would only count again. A mapping that grew in between
  * fills the array without reaching FIEMAP_EXTENT_LAST, and is read again.
+ *
+ * The first ioctl runs with FIEMAP_FLAG_SYNC, which writes dirty data back first, so delayed
+ * allocations are mapped to the blocks they got rather than to no block at all; see
+ * fiemap_ioctl() for a file whose writeback failed. The later ones run without it: what they
+ * would write back was written during the mapping, which the extents need not describe (see
+ * xal_index()), and a flush between a count and its read is when a file being written gains
+ * extents.
  */
 static int
 read_fiemap(int fd, struct fiemap **fiemap_ptr)
@@ -900,6 +937,7 @@ read_fiemap(int fd, struct fiemap **fiemap_ptr)
 	struct fiemap *fiemap = *fiemap_ptr;
 	int extents_size;
 	uint32_t n;
+	int err;
 
 	if (!fiemap) {
 		return -EINVAL;
@@ -909,9 +947,9 @@ read_fiemap(int fd, struct fiemap **fiemap_ptr)
 		fiemap->fm_length = ~0;  // maximum number of bits
 		fiemap->fm_extent_count = 0;  // read 0 extents
 
-		if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
-			XAL_DEBUG("FAILED: fiemap ioctl(); errno(%d)", errno);
-			return -errno;
+		err = fiemap_ioctl(fd, fiemap, !attempt);
+		if (err) {
+			return err;
 		}
 		if (!fiemap->fm_mapped_extents) {
 			return 0;
@@ -932,9 +970,9 @@ read_fiemap(int fd, struct fiemap **fiemap_ptr)
 		fiemap->fm_extent_count = fiemap->fm_mapped_extents;
 		fiemap->fm_mapped_extents = 0;
 
-		if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
-			XAL_DEBUG("FAILED: fiemap ioctl(); errno(%d)", errno);
-			return -errno;
+		err = fiemap_ioctl(fd, fiemap, false);
+		if (err) {
+			return err;
 		}
 
 		n = fiemap->fm_mapped_extents;
