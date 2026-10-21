@@ -888,7 +888,8 @@ exit:
 
 /*
  * Two ioctls: the first, with fm_extent_count 0, reports how many extents the file has; the
- * fiemap is then reallocated to fit and the ioctl re-run to read them.
+ * fiemap is then reallocated to fit and the ioctl re-run to read them. A file with no extents
+ * stops after the first, as the second would only count again.
  */
 static int
 read_fiemap(int fd, struct fiemap **fiemap_ptr)
@@ -906,6 +907,9 @@ read_fiemap(int fd, struct fiemap **fiemap_ptr)
 	if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
 		XAL_DEBUG("FAILED: fiemap ioctl(); errno(%d)", errno);
 		return -errno;
+	}
+	if (!fiemap->fm_mapped_extents) {
+		return 0;
 	}
 
 	extents_size = sizeof(struct fiemap_extent) * fiemap->fm_mapped_extents;
