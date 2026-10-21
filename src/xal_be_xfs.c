@@ -1039,19 +1039,24 @@ process_dinode_dir_btree_root(struct xal *xal, struct xal_odf_dinode *dinode,
 	struct xal_odf_btree_pos pos = {0};
 	uint64_t *fsbnos;
 	size_t ofz_ptr; // Offset from start of dinode to start of embedded pointers
+	size_t maxrecs;
 	int err;
 
 	XAL_DEBUG("ENTER: Directory Extents -- B+Tree -- Root Node");
 
-	pos.level = be16toh(*((uint16_t *)dfork));
-	pos.numrecs = be16toh(*((uint16_t *)dfork));
+	pos.level = be16toh(((uint16_t *)dfork)[0]);
+	pos.numrecs = be16toh(((uint16_t *)dfork)[1]);
 
 	if (pos.level < 1) {
 		XAL_DEBUG("FAILED: level(%" PRIu16 "); expected > 0", pos.level);
 		return -EINVAL;
 	}
 
-	btree_dinode_meta(xal, dinode, NULL, NULL, &ofz_ptr);
+	btree_dinode_meta(xal, dinode, &maxrecs, NULL, &ofz_ptr);
+	if (!pos.numrecs || pos.numrecs > maxrecs) {
+		XAL_DEBUG("FAILED: numrecs(%" PRIu16 "); expected 1..%zu", pos.numrecs, maxrecs);
+		return -EINVAL;
+	}
 	fsbnos = (void *)(((uint8_t *)dinode) + ofz_ptr);
 
 	if (self->content.dentries.count) {
