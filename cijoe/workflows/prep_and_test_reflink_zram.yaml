@@ -9,7 +9,8 @@ doc: |
   * Formats it with XFS *with reflink enabled*
   * Mounts it and leaves it mounted, without the heavy file population (the reflink tests
     provision their own small file set)
-  * Runs the reflink-snapshot tests (tests/test_reflink.py)
+  * Runs the reflink-snapshot tests (tests/test_reflink.py), and the other tests that need the
+    filesystem mounted (tests/test_fiemap.py, tests/test_server.py)
 
 steps:
 - name: prep_bdev
@@ -38,4 +39,4 @@ steps:
   with:
     run_local: true
     random_order: false
-    args: "tests/test_reflink.py"
+    args: "tests/test_reflink.py tests/test_fiemap.py tests/test_server.py"

@@ -26,4 +26,15 @@ xal_test_shm_version_exe = executable(
   install: true,
 )
 
+# A reader of an xal-server index, for the cijoe test of re-indexing in XAL_WATCHMODE_NONE.
+xal_test_mark_dirty_exe = executable(
+  'xal_test_mark_dirty',
+  'test_mark_dirty.c',
+  dependencies: xallib_deps,
+  link_with: xal_library,
+  include_directories: include_dirs,
+  install_rpath: xallib_rpath,
+  install: true,
+)
+
 subdir('xal-server')
