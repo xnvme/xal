@@ -63,6 +63,7 @@ xal_library = library('xal',
   sources: sources,
   dependencies: xallib_deps,
   include_directories: include_dirs,
+  install_rpath: xallib_rpath,
   install: true,
 )
 
