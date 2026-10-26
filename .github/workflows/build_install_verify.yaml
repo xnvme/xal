@@ -33,7 +33,9 @@ jobs:
         cijoe --version
 
     - name: Configure
-      run: make configure
+      run: |
+        make configure
+        meson configure build -Dxal-server=enabled
 
     - name: Build
       run: make build
@@ -49,6 +51,18 @@ jobs:
       uses: actions/upload-artifact@v4.3.0
       with:
         name: cijoe-report
+        path: |
+          cijoe/cijoe-output
+
+    - name: Test, mounted
+      id: mounted
+      run: make test-reflink-using-loop
+
+    - name: Upload CIJOE report, mounted
+      if: always() && steps.mounted.outcome != 'skipped'
+      uses: actions/upload-artifact@v4.3.0
+      with:
+        name: cijoe-report-mounted
         path: |
           cijoe/cijoe-output
 
