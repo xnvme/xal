@@ -945,7 +945,7 @@ static int
 read_fiemap(int fd, struct fiemap **fiemap_ptr)
 {
 	struct fiemap *fiemap = *fiemap_ptr;
-	int extents_size;
+	size_t extents_size;
 	uint32_t n;
 	int err;
 
