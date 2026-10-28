@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 #include <xal.h>
 #include <xal_be_fiemap.h>
@@ -537,6 +538,7 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 {
 	struct xal *cand;
 	struct stat sb, root;
+	struct statfs fs;
 	struct xal_be_fiemap *be;
 	char shm_name[XAL_PATH_MAXLEN + 9];
 	const char *shm;
@@ -682,7 +684,15 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		goto failed;
 	}
 
-	cand->sb.blocksize = sb.st_blksize;
+	// Not st_blksize: that is the preferred I/O size, which XFS reports as at least a page, or
+	// the stripe width with largeio, while FIEMAP's extents are aligned to the block size.
+	if (statfs(be->mountpoint, &fs)) {
+		XAL_DEBUG("FAILED: statfs(%s); errno(%d)", be->mountpoint, errno);
+		err = -errno;
+		goto failed;
+	}
+
+	cand->sb.blocksize = fs.f_bsize;
 	cand->sb.rootino = sb.st_ino;
 
 	if (opts->shm_name) {
