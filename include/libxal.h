@@ -510,9 +510,10 @@ xal_stop_watching_filesystem(struct xal *xal);
  * Invoking the given cb_func with cb_data for each directory-entry in the traversal. Only
  * directories and regular files are indexed, see xal_index().
  *
- * The index is checked before the traversal starts: -ESTALE is returned when it has been marked
- * dirty, which for a handle from xal_from_shm() includes the primary having closed. The check is
- * not repeated during the walk, and xal_get_root() and xal_inode_at() do not perform it at all.
+ * The index is checked before the traversal starts and again at every level of it: -ESTALE is
+ * returned when it has been marked dirty, which for a handle from xal_from_shm() includes the
+ * primary having closed, and when it is rebuilt while the walk is running. xal_get_root() and
+ * xal_inode_at() perform neither check.
  *
  * Returns 0 on success. On error, negative errno is returned to indicate the error.
  */
@@ -555,12 +556,13 @@ xal_from_shm(const char *shm_name, struct xal **out);
  * The path is printed relative to the root of the indexed tree, that is, without the basepath
  * that xal_inode_path() prefixes for the FIEMAP backend, and nothing is printed for the root
  * itself. That is what lets a caller prefix a root of its own; 'xal --find' prints the device
- * URI.
+ * URI. Use xal_inode_path() for a path accepted by xal_get_inode().
  *
  * @param xal The xal struct obtained when opened with xal_open()
  * @param inode The inode to print the path of
  *
- * @return The number of characters printed.
+ * @return The number of characters printed. Nothing is printed when the index is stale, when the
+ * parent chain is malformed, or when the path does not fit in XAL_INODE_PATH_MAXLEN bytes.
  */
 int
 xal_inode_path_pp(struct xal *xal, struct xal_inode *inode);
@@ -569,9 +571,10 @@ xal_inode_path_pp(struct xal *xal, struct xal_inode *inode);
  * Assemble the absolute path of the given inode into the given buffer.
  *
  * 'struct xal_inode' stores the leaf name of the entry; the path is assembled by walking the
- * parent chain to the root of the indexed tree. For the FIEMAP backend it is prefixed with the
- * indexed root on the local filesystem (the mountpoint, or opts.subtree when given), for the XFS
- * backend it is given as if the filesystem was mounted at root ("/").
+ * parent chain to the root of the indexed tree. The assembled path is the one accepted by
+ * xal_get_inode(): for the FIEMAP backend it is prefixed with the indexed root on the local
+ * filesystem (the mountpoint, or opts.subtree when given), for the XFS backend it is given as
+ * if the filesystem was mounted at root ("/").
  *
  * @param xal The xal struct obtained when opened with xal_open()
  * @param inode The inode to assemble the path of

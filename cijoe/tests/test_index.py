@@ -3,14 +3,15 @@ from pprint import pprint
 from pathlib import Path
 
 
-def test_compare_to_find(cijoe):
+def compare_to_find(cijoe, filename: str, args: str = ""):
+    """Have 'xal' produce a 'find-like' index and compare it to the one from 'find'"""
 
     dev_path = cijoe.getconf("xal.dev_path", None)
     mountpoint = cijoe.getconf("xal.mountpoint", None)
 
     paths = {
         "find": Path(cijoe.getconf("xal.artifacts.path")) / "find.output",
-        "xal": Path(cijoe.getconf("xal.artifacts.path")) / "xal_find.output",
+        "xal": Path(cijoe.getconf("xal.artifacts.path")) / filename,
     }
     indexes = {
         "find": [],
@@ -18,7 +19,7 @@ def test_compare_to_find(cijoe):
     }
 
     # Have 'xal' produce the 'find-like' index
-    err, state = cijoe.run(f"xal --find {dev_path} > {paths['xal']}")
+    err, state = cijoe.run(f"xal {args} --find {dev_path} > {paths['xal']}")
     assert not err
 
     for key, path in paths.items():
@@ -27,11 +28,9 @@ def test_compare_to_find(cijoe):
                 line.replace(dev_path if key == "xal" else mountpoint, "")
             )
 
-    diffs = []
-    for expected, got in zip(indexes["find"], indexes["xal"]):
-        if expected == got:
-            continue
+    assert indexes["find"] == indexes["xal"]
 
-        diffs.append({"expected": expected, "got": got})
 
-    assert not diffs
+def test_compare_to_find(cijoe):
+
+    compare_to_find(cijoe, "xal_find.output")

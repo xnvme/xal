@@ -89,6 +89,9 @@ struct xal {
 	atomic_int last_index_err;
 };
 
+char *
+path_under_basepath(char *path, const char *basepath);
+
 int
 search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode);
 

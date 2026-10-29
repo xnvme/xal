@@ -10,7 +10,10 @@ doc: |
   * Extracts an index of generated files
   * Extracts a block-map / extents for all files in the file-system
   * Run tests
-  
+  * Mount the file-system again, and run the tests that need it mounted
+    (tests/test_fiemap_index.py)
+  * Unmount the file-system, leaving the device as the workflow found it
+
   zram: https://docs.kernel.org/admin-guide/blockdev/zram.html
 
 steps:
@@ -40,3 +43,24 @@ steps:
     run_local: true
     random_order: false
     args: "tests"
+
+- name: mount
+  uses: prep_files
+  with:
+    dev-path: '{{ config.xal.dev_path }}'
+    mountpoint: '{{ config.xal.mountpoint }}'
+    keep_mounted: true
+    skip_populate: true
+
+- name: test_mounted
+  uses: core.testrunner
+  with:
+    run_local: true
+    random_order: false
+    args: "tests/test_fiemap_index.py"
+
+- name: umount
+  uses: core.cmdrunner
+  with:
+    commands:
+    - sudo umount {{ config.xal.mountpoint }}
