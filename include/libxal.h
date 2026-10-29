@@ -510,9 +510,10 @@ xal_stop_watching_filesystem(struct xal *xal);
  * Invoking the given cb_func with cb_data for each directory-entry in the traversal. Only
  * directories and regular files are indexed, see xal_index().
  *
- * The index is checked before the traversal starts: -ESTALE is returned when it has been marked
- * dirty, which for a handle from xal_from_shm() includes the primary having closed. The check is
- * not repeated during the walk, and xal_get_root() and xal_inode_at() do not perform it at all.
+ * The index is checked before the traversal starts and again at every level of it: -ESTALE is
+ * returned when it has been marked dirty, which for a handle from xal_from_shm() includes the
+ * primary having closed, and when it is rebuilt while the walk is running. xal_get_root() and
+ * xal_inode_at() perform neither check.
  *
  * Returns 0 on success. On error, negative errno is returned to indicate the error.
  */
