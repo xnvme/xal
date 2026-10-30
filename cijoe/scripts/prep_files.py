@@ -112,6 +112,38 @@ def provoke_odf_dir_fmt_btree(args: Namespace, cijoe: Cijoe) -> int:
     )
 
 
+def provoke_odf_dir_fmt_btree_leaves(args: Namespace, cijoe: Cijoe) -> int:
+    """
+    Create a directory whose extent B+tree has more than one leaf, so that the root in its inode
+    holds more than one record.
+
+    A leaf of 4 KiB holds 251 extent records. With the 8 KiB directory blocks prep_xfs makes, names
+    of 255 bytes leave room for 29 entries in a block, and writing each file with O_DIRECT
+    allocates its block before the next entry is added, so the next directory block does not
+    follow the previous one and each becomes its own extent: 10000 files make about 360 extents.
+    """
+
+    dir = args.mountpoint / "should-be-dir-fmt_btree-leaves"
+    count = 10000
+
+    for cmd in [
+        f"mkdir -p {dir}",
+        (
+            "pad=$(printf 'a%.0s' $(seq 238)); "
+            f'i=0; while [ "$i" -lt {count} ]; do '
+            f'dd if=/dev/urandom of={dir}/long-name-$(printf %06d "$i")-$pad bs=4K count=1 '
+            "oflag=direct status=none || break"
+            "; i=$((i + 1)); done"
+            f'; [ "$i" -eq {count} ]'
+        ),
+    ]:
+        err, state = cijoe.run(cmd)
+        if err:
+            return err
+
+    return 0
+
+
 def provoke_odf_file_fmt_local(args: Namespace, cijoe: Cijoe) -> int:
     """Create empty files, these should be represented as FMT_LOCAL?"""
 
@@ -228,6 +260,9 @@ def populate(args, cijoe) -> int:
         return err
 
     if err := provoke_odf_dir_fmt_btree(args, cijoe):
+        return err
+
+    if err := provoke_odf_dir_fmt_btree_leaves(args, cijoe):
         return err
 
     if err := provoke_odf_file_fmt_local(args, cijoe):
