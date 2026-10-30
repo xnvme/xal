@@ -330,6 +330,11 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 
 	switch (opts->be) {
 		case XAL_BACKEND_XFS:
+			/* Leases are taken on the files of a mounted filesystem */
+			if (opts->watch_mode == XAL_WATCHMODE_READ_LEASE) {
+				XAL_DEBUG("FAILED: the read-lease mode needs the FIEMAP backend");
+				return -ENOTSUP;
+			}
 			err = xal_be_xfs_open(dev, xal, opts);
 			if (err) {
 				XAL_DEBUG("FAILED: xal_be_xfs_open(); err(%d)", err);

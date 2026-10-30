@@ -15,6 +15,17 @@ xal_snapshot_hold_exe = executable(
   install: true,
 )
 
+# Links libxal to hold a file's extents under a read lease (used by the lease cijoe tests).
+xal_lease_hold_exe = executable(
+  'xal_lease_hold',
+  'xal_lease_hold.c',
+  dependencies: xallib_deps,
+  link_with: xal_library,
+  include_directories: include_dirs,
+  install_rpath: xallib_rpath,
+  install: true,
+)
+
 # Installed so the cijoe suite can run it from PATH, as with the tools/ test aids.
 xal_test_shm_version_exe = executable(
   'xal_test_shm_version',
