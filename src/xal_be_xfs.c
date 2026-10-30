@@ -345,26 +345,23 @@ decode_iab3_leaf_records(struct xal *xal, struct xal_ag *ag, void *buf, uint64_t
 		/**
 		 * Determine the block number relative to the allocation group
 		 *
-		 * This block should be the first block
+		 * When a block holds more inodes than a chunk, the chunk can start inside the block
 		 */
 		xal_ino_decode_relative(xal, rec->startino, &agbno, &agbino);
-
-		/**
-		 * Assumption: if the inode-offset is non-zero, then offset-calucations are
-		 *             incorrect as they do not account for the only the block where the
-		 *             inode-chunk is supposed to start.
-		 */
-		assert(agbino == 0);
 
 		/**
 		 * Populate the inode-buffer with data from all the blocks
 		 */
 		{
-			uint64_t chunk_nbytes =
-			    (CHUNK_NINO / xal->sb.inopblock) * xal->sb.blocksize;
-			uint64_t chunk_offset = agbno * xal->sb.blocksize + ag->offset;
+			uint64_t chunk_nbytes = CHUNK_NINO * xal->sb.inodesize;
+			uint64_t chunk_offset = ag->offset + agbno * xal->sb.blocksize +
+						(uint64_t)agbino * xal->sb.inodesize;
 
-			assert(chunk_nbytes < BUF_NBYTES);
+			if (chunk_nbytes > BUF_NBYTES) {
+				XAL_DEBUG("FAILED: inodesize(%" PRIu16 ") too large",
+					  xal->sb.inodesize);
+				return -EINVAL;
+			}
 
 			memset(be->buf, 0, chunk_nbytes);
 
