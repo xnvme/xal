@@ -198,6 +198,11 @@ xal_be_xfs_close(struct xal *xal)
 		kh_destroy(ino_to_dinode, be->dinodes_map);
 	}
 	free(be->dinodes);
+
+	if (be->bdev_fd >= 0) {
+		close(be->bdev_fd);
+		be->bdev_fd = -1;
+	}
 }
 
 /**
@@ -693,7 +698,7 @@ retrieve_and_decode_primary_superblock(struct xnvme_dev *dev, void *buf, struct 
 	err = dev_read(dev, buf, 4096, 0);
 	if (err) {
 		XAL_DEBUG("FAILED: dev_read()\n");
-		return -errno;
+		return err;
 	}
 
 	cand = calloc(1, sizeof(*cand));
@@ -737,27 +742,42 @@ retrieve_and_decode_primary_superblock(struct xnvme_dev *dev, void *buf, struct 
 int
 xal_be_xfs_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 {
+	const struct xnvme_ident *ident = xnvme_dev_get_ident(dev);
 	struct xal *cand = NULL;
 	struct xal_be_xfs *be;
 	char shm_name[XAL_PATH_MAXLEN + 9];
 	const char *shm;
+	struct stat st;
+	int bdev_fd = -1;
 	void *buf;
 	int err;
 
+	if (ident && !stat(ident->uri, &st) && S_ISBLK(st.st_mode)) {
+		bdev_fd = open(ident->uri, O_RDONLY | O_EXCL | O_CLOEXEC);
+		if (bdev_fd < 0) {
+			err = -errno;
+			XAL_DEBUG("FAILED: open(%s, O_EXCL), mounted or in use; errno(%d)",
+				  ident->uri, errno);
+			return err;
+		}
+	}
+
 	buf = xnvme_buf_alloc(dev, BUF_NBYTES);
 	if (!buf) {
+		err = -errno;
 		XAL_DEBUG("FAILED: xnvme_buf_alloc()");
-		return -errno;
+		goto failed_claim;
 	}
 
 	err = retrieve_and_decode_primary_superblock(dev, buf, &cand);
 	if (err) {
 		XAL_DEBUG("FAILED: retrieve_and_decode_primary_superblock()");
 		xnvme_buf_free(dev, buf);
-		return -errno;
+		goto failed_claim;
 	}
 
 	be = (struct xal_be_xfs *)&cand->be;
+	be->bdev_fd = bdev_fd;
 
 	be->base.type = XAL_BACKEND_XFS;
 	be->base.close = xal_be_xfs_close;
@@ -816,6 +836,13 @@ xal_be_xfs_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 
 failed:
 	xal_close(cand);
+
+	return err;
+
+failed_claim:
+	if (bdev_fd >= 0) {
+		close(bdev_fd);
+	}
 
 	return err;
 }

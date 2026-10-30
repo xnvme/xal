@@ -133,7 +133,14 @@ drivers (e.g., SPDK/NVMe, xNVMe/uPCIe) or peripheral devices (e.g.,
 xNVMe/uPCIe/CUDA) where the OS has no control over the storage.
 
 There is no notification infrastructure for this backend, since the filesystem
-is not mounted and changes are not expected.
+is not mounted and changes are not expected. A block device is opened with
+`O_EXCL`, as `mount` does, until `xal_close()`: `xal_open()` returns `-EBUSY`
+while it is mounted, claimed otherwise (by dm, md or swap, or for a whole disk
+through one of its partitions, and the other way round), or held by another
+XFS-backend handle, which `xal_from_shm()` shares instead, and meanwhile it
+cannot be mounted or opened exclusively. Readers attached with
+`xal_from_shm()` hold no claim of their own. Other writers are not stopped.
+Character devices, such as `/dev/ngXnY`, and image files are not claimed.
 
 For details on the XFS on-disk format as parsed by this backend, see
 [docs/xfs-internals.md](docs/xfs-internals.md).
@@ -141,8 +148,16 @@ For details on the XFS on-disk format as parsed by this backend, see
 ### Auto-detection
 
 If `opts.be` is left as 0, `xal_open()` auto-selects the backend: if the
-device URI is found in `/proc/mounts` the FIEMAP backend is chosen,
-otherwise XFS is used.
+filesystem on the device is mounted the FIEMAP backend is chosen, otherwise
+XFS is used. The mount is looked up in `/proc/self/mountinfo`: a block
+device by its device number, so that another node for it, such as
+`/dev/dm-0` for `/dev/mapper/vg-lv`, is found too, and other URIs, or a
+filesystem with an anonymous device number such as btrfs, by the mount
+source. A mount of the filesystem's root is preferred over a bind mount of a
+directory in it, and mount points that are not directories or have something
+mounted over them are skipped. An error other than finding no mount, such as
+`-ENAMETOOLONG` for a mount point longer than `XAL_PATH_MAXLEN`, is returned
+rather than taken for no mount.
 
 ## API Usage
 

@@ -47,7 +47,7 @@ watchmode = 0
 | `log_level` | no | syslog verbosity; defaults to NOTICE |
 | `devices[].uri` | yes | block device to index; must be mounted |
 | `devices[].shm_name` | yes | name readers pass to `xal_from_shm()` |
-| `devices[].mountpoint` | no | looked up in `/proc/mounts` when omitted |
+| `devices[].mountpoint` | no | looked up in `/proc/self/mountinfo` when omitted |
 | `devices[].subtree` | no | absolute path at or under the mountpoint to restrict the index to |
 | `xal.watchmode` | no | see `enum xal_watchmode`; defaults to none |
 
