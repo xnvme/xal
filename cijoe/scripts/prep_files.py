@@ -112,6 +112,46 @@ def provoke_odf_dir_fmt_btree(args: Namespace, cijoe: Cijoe) -> int:
     )
 
 
+def provoke_odf_fmt_btree_no_attr_fork(args: Namespace, cijoe: Cijoe) -> int:
+    """
+    Make a directory and a file in btree format with no attr fork, so their di_forkoff is 0.
+
+    Removing the only xattr of a new inode removes its attr fork. The directory then gets 1000
+    long names, each file written with O_DIRECT before the next directory block is allocated,
+    which gives about 35 extents; the file gets 100 separate extents.
+    """
+
+    dir = args.mountpoint / "should-be-dir-fmt_btree-no_attr_fork"
+    file = args.mountpoint / "should-be-file-fmt_btree-no_attr_fork" / "fragmented-nextents-100"
+    drop_xattr = (
+        "python3 -c 'import os, sys; "
+        'os.setxattr(sys.argv[1], "user.xal", b"1"); '
+        "os.removexattr(sys.argv[1], \"user.xal\")'"
+    )
+
+    for cmd in [
+        f"mkdir -p {dir} {file.parent} && truncate -s 0 {file}",
+        f"{drop_xattr} {dir} && {drop_xattr} {file}",
+        (
+            "pad=$(printf 'a%.0s' $(seq 238)); "
+            'i=0; while [ "$i" -lt 1000 ]; do '
+            f'dd if=/dev/urandom of={dir}/long-name-$(printf %06d "$i")-$pad bs=4K count=1 '
+            "oflag=direct status=none || break"
+            '; i=$((i + 1)); done; [ "$i" -eq 1000 ]'
+        ),
+        (
+            'i=0; while [ "$i" -lt 100 ]; do '
+            f"fallocate -o $((i * 8192)) -l 4096 {file} || break"
+            '; i=$((i + 1)); done; [ "$i" -eq 100 ]'
+        ),
+    ]:
+        err, state = cijoe.run(cmd)
+        if err:
+            return err
+
+    return 0
+
+
 def provoke_odf_file_fmt_local(args: Namespace, cijoe: Cijoe) -> int:
     """Create empty files, these should be represented as FMT_LOCAL?"""
 
@@ -228,6 +268,9 @@ def populate(args, cijoe) -> int:
         return err
 
     if err := provoke_odf_dir_fmt_btree(args, cijoe):
+        return err
+
+    if err := provoke_odf_fmt_btree_no_attr_fork(args, cijoe):
         return err
 
     if err := provoke_odf_file_fmt_local(args, cijoe):
