@@ -214,9 +214,9 @@ btree_dinode_meta(struct xal *xal, struct xal_odf_dinode *dinode, size_t *maxrec
 		  size_t *pointers)
 {
 	size_t core_nbytes = sizeof(*dinode);
-	size_t attr_ofz = core_nbytes + dinode->di_forkoff * 8UL;
-	size_t attr_nbytes = xal->sb.inodesize - attr_ofz;
-	size_t data_nbytes = xal->sb.inodesize - core_nbytes - attr_nbytes;
+	// With di_forkoff 0 there is no attr fork and the data fork takes the whole literal area
+	size_t data_nbytes =
+	    dinode->di_forkoff ? dinode->di_forkoff * 8UL : xal->sb.inodesize - core_nbytes;
 	size_t mrecs = (data_nbytes - 4) / 16;
 
 	XAL_DEBUG("di_forkoff(%" PRIu16 ", %" PRIu64 ")", dinode->di_forkoff,
@@ -1040,19 +1040,24 @@ process_dinode_dir_btree_root(struct xal *xal, struct xal_odf_dinode *dinode,
 	struct xal_odf_btree_pos pos = {0};
 	uint64_t *fsbnos;
 	size_t ofz_ptr; // Offset from start of dinode to start of embedded pointers
+	size_t maxrecs;
 	int err;
 
 	XAL_DEBUG("ENTER: Directory Extents -- B+Tree -- Root Node");
 
-	pos.level = be16toh(*((uint16_t *)dfork));
-	pos.numrecs = be16toh(*((uint16_t *)dfork));
+	pos.level = be16toh(((uint16_t *)dfork)[0]);
+	pos.numrecs = be16toh(((uint16_t *)dfork)[1]);
 
 	if (pos.level < 1) {
 		XAL_DEBUG("FAILED: level(%" PRIu16 "); expected > 0", pos.level);
 		return -EINVAL;
 	}
 
-	btree_dinode_meta(xal, dinode, NULL, NULL, &ofz_ptr);
+	btree_dinode_meta(xal, dinode, &maxrecs, NULL, &ofz_ptr);
+	if (!pos.numrecs || pos.numrecs > maxrecs) {
+		XAL_DEBUG("FAILED: numrecs(%" PRIu16 "); expected 1..%zu", pos.numrecs, maxrecs);
+		return -EINVAL;
+	}
 	fsbnos = (void *)(((uint8_t *)dinode) + ofz_ptr);
 
 	if (self->content.dentries.count) {
