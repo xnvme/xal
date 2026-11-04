@@ -1,8 +1,10 @@
 #ifndef XAL_BE_FIEMAP_H
 #define XAL_BE_FIEMAP_H
 
+struct fiemap;
 struct fiemap_extent;
 struct xal_reflink;
+struct xal_lease_set;
 
 /**
  * Basename prefix of the per-session reflink shadow directory: <mnt>/.xal_snapshot.<pid>
@@ -23,7 +25,7 @@ struct xal_be_fiemap {
 	struct xal_reflink
 	    *reflink; ///< Reflink-snapshot state; non-NULL in XAL_WATCHMODE_REFLINK_SNAPSHOT
 
-	uint8_t _rsvd[8];
+	struct xal_lease_set *lease; ///< Read-lease state; non-NULL in XAL_WATCHMODE_READ_LEASE
 };
 XAL_STATIC_ASSERT(sizeof(struct xal_be_fiemap) == XAL_BACKEND_SIZE, "Incorrect size");
 
@@ -35,6 +37,9 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts);
 
 int
 xal_be_fiemap_get_inode(struct xal *xal, char *path, struct xal_inode **inode);
+
+int
+fiemap_ioctl(int fd, struct fiemap *fiemap, bool sync);
 
 void
 fiemap_extent_to_xal(const struct fiemap_extent *fe, uint32_t blocksize, struct xal_extent *extent);
