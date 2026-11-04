@@ -66,6 +66,21 @@ jobs:
         path: |
           cijoe/cijoe-output
 
+    - name: Test, read lease
+      id: lease
+      # The runner is thrown away after the job, so the tests may change fs.lease-break-time
+      env:
+        XAL_TEST_SET_LEASE_BREAK_TIME: 1
+      run: make test-lease-using-loop
+
+    - name: Upload CIJOE report, read lease
+      if: always() && steps.lease.outcome != 'skipped'
+      uses: actions/upload-artifact@v4.3.0
+      with:
+        name: cijoe-report-lease
+        path: |
+          cijoe/cijoe-output
+
     - name: Upload index and block map artifacts
       if: always()
       uses: actions/upload-artifact@v4.3.0

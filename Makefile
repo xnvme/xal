@@ -69,6 +69,18 @@ test-reflink-using-zram:
 		--config configs/localhost-zram.toml \
 		--monitor
 
+.PHONY: test-lease-using-loop
+test-lease-using-loop:
+	cd cijoe && cijoe workflows/prep_and_test_lease.yaml \
+		--config configs/localhost-loop.toml \
+		--monitor
+
+.PHONY: test-lease-using-zram
+test-lease-using-zram:
+	cd cijoe && cijoe workflows/prep_and_test_lease_zram.yaml \
+		--config configs/localhost-zram.toml \
+		--monitor
+
 # DESTRUCTIVE: formats configs/localhost-nvme.toml's dev_path. Point it at a spare device first.
 .PHONY: test-reflink-using-nvme
 test-reflink-using-nvme:
