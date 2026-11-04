@@ -1033,6 +1033,18 @@ fiemap_extent_flag(uint32_t fe_flags)
 	return flag;
 }
 
+/**
+ * Fill an xal extent from a FIEMAP extent, in units of blocksize
+ */
+void
+fiemap_extent_to_xal(const struct fiemap_extent *fe, uint32_t blocksize, struct xal_extent *extent)
+{
+	extent->start_offset = fe->fe_logical / blocksize;
+	extent->start_block = fe->fe_physical / blocksize;
+	extent->nblocks = fe->fe_length / blocksize;
+	extent->flag = fiemap_extent_flag(fe->fe_flags);
+}
+
 static int
 xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *inode)
 {
@@ -1104,12 +1116,8 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 		extents->count = fiemap->fm_mapped_extents;
 
 		for (uint32_t i = 0; i < extents->count; i++) {
-			struct xal_extent *extent = xal_extent_at(xal, extents->extent_idx + i);
-
-			extent->start_offset = fiemap->fm_extents[i].fe_logical / xal->sb.blocksize;
-			extent->start_block = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize;
-			extent->nblocks = fiemap->fm_extents[i].fe_length / xal->sb.blocksize;
-			extent->flag = fiemap_extent_flag(fiemap->fm_extents[i].fe_flags);
+			fiemap_extent_to_xal(&fiemap->fm_extents[i], xal->sb.blocksize,
+					     xal_extent_at(xal, extents->extent_idx + i));
 		}
 	}
 
