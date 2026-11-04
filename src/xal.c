@@ -330,6 +330,11 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 
 	switch (opts->be) {
 		case XAL_BACKEND_XFS:
+			/* Leases are taken on the files of a mounted filesystem */
+			if (opts->watch_mode == XAL_WATCHMODE_READ_LEASE) {
+				XAL_DEBUG("FAILED: the read-lease mode needs the FIEMAP backend");
+				return -ENOTSUP;
+			}
 			err = xal_be_xfs_open(dev, xal, opts);
 			if (err) {
 				XAL_DEBUG("FAILED: xal_be_xfs_open(); err(%d)", err);
@@ -1061,6 +1066,14 @@ xal_get_extents(struct xal *xal, char *path, struct xal_extents **extents)
 {
 	struct xal_inode *inode;
 	int err;
+
+	/* Leased files are mapped again in place, under no sequence lock */
+	if (((struct xal_backend_base *)&xal->be)->type == XAL_BACKEND_FIEMAP &&
+	    ((struct xal_be_fiemap *)&xal->be)->lease) {
+		XAL_DEBUG(
+		    "FAILED: XAL_WATCHMODE_READ_LEASE hands out extents by xal_extents_acquire()");
+		return -ENOTSUP;
+	}
 
 	err = xal_get_inode(xal, path, &inode);
 	if (err) {
