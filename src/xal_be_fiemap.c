@@ -21,6 +21,7 @@
 #include <xal.h>
 #include <xal_be_fiemap.h>
 #include <xal_be_fiemap_inotify.h>
+#include <xal_be_fiemap_lease.h>
 #include <xal_odf.h>
 
 KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
@@ -363,6 +364,9 @@ xal_be_fiemap_close(struct xal *xal)
 			free(be->inotify);
 			be->inotify = NULL;
 		}
+		if (be->lease) {
+			xal_be_fiemap_lease_close(xal);
+		}
 		// A callback can have re-indexed since xal_close() marked the index dirty; a secondary
 		// attaching now must not get a handle on clones about to be purged.
 		if (xal->state) {
@@ -552,7 +556,8 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	// Accept only known modes: anything unrecognised must not fall through to the watch setup
 	// below and be treated as "some mode".
 	if ((opts->watch_mode != XAL_WATCHMODE_NONE) &&
-	    (opts->watch_mode != XAL_WATCHMODE_REFLINK_SNAPSHOT)) {
+	    (opts->watch_mode != XAL_WATCHMODE_REFLINK_SNAPSHOT) &&
+	    (opts->watch_mode != XAL_WATCHMODE_READ_LEASE)) {
 		XAL_DEBUG("FAILED: watch_mode(%d) is not a valid xal_watchmode", opts->watch_mode);
 		return -EINVAL;
 	}
@@ -624,7 +629,21 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		}
 	}
 
-	if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
+	if (opts->watch_mode == XAL_WATCHMODE_READ_LEASE) {
+		// read-lease mode: no inotify watch; files are mapped on demand under a lease.
+		// Leases and reader counts are this process's; other processes have nothing to pin.
+		if (opts->shm_name) {
+			XAL_DEBUG("FAILED: XAL_WATCHMODE_READ_LEASE does not support shm_name");
+			err = -ENOTSUP;
+			goto failed;
+		}
+
+		err = xal_be_fiemap_lease_init(cand, be->mountpoint, opts);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_lease_init(); err(%d)", err);
+			goto failed;
+		}
+	} else if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
 		// The clones pin the blocks; the watch below only reports that the filesystem has
 		// moved on since.
 		size_t dlen;
@@ -654,7 +673,7 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 			  be->reflink->dir, be->subtree ? be->subtree : "(whole tree)");
 	}
 
-	if (opts->watch_mode) {
+	if (opts->watch_mode == XAL_WATCHMODE_REFLINK_SNAPSHOT) {
 		be->inotify = calloc(1, sizeof(struct xal_inotify));
 		if (!be->inotify) {
 			XAL_DEBUG("FAILED: calloc(); errno(%d)", errno);
@@ -904,7 +923,7 @@ exit:
  * flag, and an error that is not the flush's fails that run too; see xal_index() for what the
  * extents then mean.
  */
-static int
+int
 fiemap_ioctl(int fd, struct fiemap *fiemap, bool sync)
 {
 	fiemap->fm_flags = sync ? FIEMAP_FLAG_SYNC : 0;
@@ -1019,6 +1038,18 @@ fiemap_extent_flag(uint32_t fe_flags)
 	return flag;
 }
 
+/**
+ * Fill an xal extent from a FIEMAP extent, in units of blocksize
+ */
+void
+fiemap_extent_to_xal(const struct fiemap_extent *fe, uint32_t blocksize, struct xal_extent *extent)
+{
+	extent->start_offset = fe->fe_logical / blocksize;
+	extent->start_block = fe->fe_physical / blocksize;
+	extent->nblocks = fe->fe_length / blocksize;
+	extent->flag = fiemap_extent_flag(fe->fe_flags);
+}
+
 static int
 xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *inode)
 {
@@ -1030,6 +1061,12 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 	if (!xal_inode_is_file(inode)) {
 		XAL_DEBUG("FAILED: cannot process file at path(%s) - not a file", path);
 		return -EINVAL;
+	}
+
+	/* Mapped on demand by xal_extents_acquire(), under a lease. */
+	if (be->lease) {
+		inode->content.extents.count = 0;
+		return be->path_inode_map ? path_map_insert(be->path_inode_map, path, inode) : 0;
 	}
 
 	/* An entry replaced since it was classified is neither followed nor blocked on. */
@@ -1089,12 +1126,8 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 		extents->count = fiemap->fm_mapped_extents;
 
 		for (uint32_t i = 0; i < extents->count; i++) {
-			struct xal_extent *extent = xal_extent_at(xal, extents->extent_idx + i);
-
-			extent->start_offset = fiemap->fm_extents[i].fe_logical / xal->sb.blocksize;
-			extent->start_block  = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize;
-			extent->nblocks      = fiemap->fm_extents[i].fe_length / xal->sb.blocksize;
-			extent->flag         = fiemap_extent_flag(fiemap->fm_extents[i].fe_flags);
+			fiemap_extent_to_xal(&fiemap->fm_extents[i], xal->sb.blocksize,
+					     xal_extent_at(xal, extents->extent_idx + i));
 		}
 	}
 
@@ -1202,6 +1235,14 @@ xal_be_fiemap_index(struct xal *xal)
 		return -EINVAL;
 	}
 
+	// Leases point at inodes in the pools about to be cleared. Refused before the index state
+	// changes, so that a caller holding extents keeps a usable handle.
+	err = xal_be_fiemap_lease_reset(xal, false);
+	if (err) {
+		XAL_DEBUG("FAILED: xal_be_fiemap_lease_reset(); err(%d)", err);
+		return err;
+	}
+
 	if (be->inotify) {
 		pthread_mutex_lock(&be->inotify->index_lock);
 	}
@@ -1283,6 +1324,12 @@ xal_be_fiemap_index(struct xal *xal)
 
 	if (be->reflink) {
 		XAL_DEBUG("INFO: reflink snapshot complete; clones under dir(%s)", be->reflink->dir);
+	}
+
+	err = xal_be_fiemap_lease_prepare(xal);
+	if (err) {
+		XAL_DEBUG("FAILED: xal_be_fiemap_lease_prepare(); err(%d)", err);
+		goto exit;
 	}
 
 exit:
