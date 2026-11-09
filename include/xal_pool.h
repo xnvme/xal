@@ -16,7 +16,7 @@ struct xal_pool {
 	size_t growby;	     ///< Number of reserved elements to allocate at a time
 	size_t free;	     ///< Index / position of the next free element
 	size_t element_size; ///< Size of a single element in bytes
-	char *shm_name;      ///< Name of shared memory region, may be NULL
+	char *shm_name;	     ///< Name of shared memory region, may be NULL
 	void *memory;	     ///< Memory space for elements
 };
 
@@ -40,7 +40,7 @@ xal_pool_unmap(struct xal_pool *pool, bool unlink);
  */
 int
 xal_pool_map(struct xal_pool *pool, size_t reserved, size_t allocated, size_t element_size,
-             const char *shm_name);
+	     const char *shm_name);
 
 /**
  *

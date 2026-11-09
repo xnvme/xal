@@ -109,9 +109,8 @@ parse_devices(toml_datum_t devices, struct xal_server_conf *conf)
 		/* Left to shm_open() a malformed name surfaces as a bare errno, with nothing tying
 		 * it back to this entry. */
 		if (strchr(dev->shm_name + 1, '/')) {
-			syslog(LOG_ERR,
-			       "device %u: 'shm_name' (%s) must not have internal '/'",
-			       i, dev->shm_name);
+			syslog(LOG_ERR, "device %u: 'shm_name' (%s) must not have internal '/'", i,
+			       dev->shm_name);
 			return -EINVAL;
 		}
 

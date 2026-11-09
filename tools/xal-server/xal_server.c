@@ -37,8 +37,8 @@ on_signal(int signo __attribute__((unused)))
 struct xal_server_watch {
 	const struct xal_server_dev *dev;
 	unsigned int backoff_ms; ///< Wait after a failed re-index, doubled on each failure
-	uint64_t retry_ms;       ///< CLOCK_MONOTONIC time at which that wait ends
-	int err;                 ///< Error of the last re-index, 0 after a success
+	uint64_t retry_ms;	 ///< CLOCK_MONOTONIC time at which that wait ends
+	int err;		 ///< Error of the last re-index, 0 after a success
 };
 
 /**
@@ -102,8 +102,8 @@ serve_marks(unsigned int nxals, struct xal **xals, struct xal_server_watch *watc
 
 			err = xal_index(xals[i]);
 			if (err) {
-				watch->backoff_ms = watch->backoff_ms ? 2 * watch->backoff_ms
-								      : XAL_SERVER_TICK_MS;
+				watch->backoff_ms =
+				    watch->backoff_ms ? 2 * watch->backoff_ms : XAL_SERVER_TICK_MS;
 				if (watch->backoff_ms > XAL_SERVER_BACKOFF_MAX_MS) {
 					watch->backoff_ms = XAL_SERVER_BACKOFF_MAX_MS;
 				}

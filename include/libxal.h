@@ -40,8 +40,8 @@
 #define XAL_POOL_IDX_NONE UINT32_MAX
 
 enum xal_backend {
-	XAL_BACKEND_XFS     = 1,
-	XAL_BACKEND_FIEMAP  = 2,
+	XAL_BACKEND_XFS = 1,
+	XAL_BACKEND_FIEMAP = 2,
 };
 
 enum xal_watchmode {
@@ -79,8 +79,10 @@ enum xal_watchmode {
 };
 
 enum xal_file_lookupmode {
-	XAL_FILE_LOOKUPMODE_TRAVERSE = 0,  ///< Traverses the file tree from xal->root using binary search at each level to find the inode.
-	XAL_FILE_LOOKUPMODE_HASHMAP = 1,   ///< Uses a hash map for constant-time inode lookup in xal_get_inode(), with higher memory usage.
+	XAL_FILE_LOOKUPMODE_TRAVERSE = 0, ///< Traverses the file tree from xal->root using binary
+					  ///< search at each level to find the inode.
+	XAL_FILE_LOOKUPMODE_HASHMAP = 1,  ///< Uses a hash map for constant-time inode lookup in
+					  ///< xal_get_inode(), with higher memory usage.
 };
 
 struct xal_opts {
@@ -157,12 +159,12 @@ struct xal_inode;
 
 struct xal_dentries {
 	uint32_t inodes_idx; ///< Index of first child in xal->inodes pool
-	uint32_t count;      ///< Number of children; for directories
+	uint32_t count;	     ///< Number of children; for directories
 };
 
 struct xal_extents {
 	uint32_t extent_idx; ///< Index of first extent in xal->extents pool
-	uint32_t count;      ///< Number of extents
+	uint32_t count;	     ///< Number of extents
 };
 
 union xal_inode_content {
@@ -174,9 +176,10 @@ struct xal_inode {
 	uint64_t ino;  ///< Inode number of the directory entry; Should the AG be added here?
 	uint64_t size; ///< Size in bytes
 	union xal_inode_content content;
-	uint8_t ftype;			      ///< File-type (directory, filename, symlink etc.)
-	uint8_t namelen;		      ///< Length of the name; not counting nul-termination
-	char name[XAL_INODE_NAME_MAXLEN + 1]; ///< Leaf name of the entry, nul-terminated; not a path, see xal_inode_path()
+	uint8_t ftype;	 ///< File-type (directory, filename, symlink etc.)
+	uint8_t namelen; ///< Length of the name; not counting nul-termination
+	char name[XAL_INODE_NAME_MAXLEN +
+		  1]; ///< Leaf name of the entry, nul-terminated; not a path, see xal_inode_path()
 	uint8_t reserved[22];
 	uint32_t parent_idx;
 };
@@ -244,7 +247,8 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode);
  *         -ENODATA for an extent with XAL_EXTENT_NOADDR set, whose start_block is no address.
  */
 int
-xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
+xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent,
+		    struct xal_extent_converted *output);
 
 /**
  * Returns the extent information in blocks using the LBA format on the block device.
@@ -257,13 +261,14 @@ xal_extent_in_bytes(struct xal *xal, const struct xal_extent *extent, struct xal
  *         -ENODATA for an extent with XAL_EXTENT_NOADDR set, whose start_block is no address.
  */
 int
-xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent, struct xal_extent_converted *output);
+xal_extent_in_lba(struct xal *xal, const struct xal_extent *extent,
+		  struct xal_extent_converted *output);
 
 /**
  * Returns the root of the file-system
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * 
+ *
  * @return On success, the inode at the root of the file-system is retuned
  */
 struct xal_inode *
@@ -272,11 +277,11 @@ xal_get_root(struct xal *xal);
 /**
  * Returns true when the index is marked dirty: the watch saw the filesystem change, or
  * xal_mark_dirty() was called. See enum xal_watchmode for what that means for extents in hand.
- * 
+ *
  * @note If the xal struct was not opened with backend "fiemap", change detection is not supported.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * 
+ *
  * @return a boolean value, indicating whether breaking changes to the file-system have
  *         been found.
  */
@@ -301,12 +306,12 @@ xal_mark_dirty(struct xal *xal);
 
 /**
  * Returns the current value of the sequence lock.
- * 
+ *
  * An uneven number indicates the struct is being modified and is not safe to read. An even number
  * indicates that the struct is safe to read.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * 
+ *
  * @return the current value of the sequence lock
  */
 int
@@ -388,8 +393,8 @@ xal_dinodes_retrieve(struct xal *xal);
 /**
  * Produce an index of the directory and files stored on the device
  *
- * Assumes that you have retrieved all the inodes from disk via xal_dinodes_retrieve() if opened with
- * backend XAL_BACKEND_XFS.
+ * Assumes that you have retrieved all the inodes from disk via xal_dinodes_retrieve() if opened
+ * with backend XAL_BACKEND_XFS.
  *
  * Only directories and regular files are indexed; symlinks and special files are skipped, and so
  * is anything mounted inside the tree with XAL_BACKEND_FIEMAP. That backend also checks the
@@ -488,17 +493,17 @@ xal_watch_filesystem(struct xal *xal, xal_dirty_cb cb, void *cb_args);
 /**
  * Stop the background thread listening to inotify events of changes to the file system on the
  * block device.
- * 
+ *
  * Assumes that
  *  - you have run xal_open() with backend FIEMAP and a watch_mode other than XAL_WATCHMODE_NONE,
  *  - the background thread has been started, see `xal_watch_filesystem()`,
- *  - the background thread has not previously been stopped and joined by `xal_close()` or 
+ *  - the background thread has not previously been stopped and joined by `xal_close()` or
  *    `xal_stop_watching_filesystem()`.
- * 
+ *
  * If these assumptions do not hold, this will result in an error.
- * 
+ *
  * Requires the same external serialisation as xal_watch_filesystem().
- * 
+ *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
@@ -611,17 +616,17 @@ xal_inode_is_file(struct xal_inode *inode);
 
 /**
  * Retrieve the inode that represent the file or directory at the given path.
- * 
+ *
  * If xal is opened with XAL_FILE_LOOKUPMODE_HASHMAP, this will be a constant
  * time lookup. Else, it will search through the tree at xal->root to find the
  * inode.
  *
  * In hashmap mode a lookup racing xal_index() in another thread of the same process can compare
  * against a key that the re-index has already freed. Serialising the two avoids it.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
-			   be given as if it was mounted at root ("/").
+ * @param path Absolute path to the file or directory. If opened with the XFS backend, the path
+ should be given as if it was mounted at root ("/").
  * @param inode Pointer for the found inode
  *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
@@ -632,7 +637,7 @@ xal_get_inode(struct xal *xal, char *path, struct xal_inode **inode);
 /**
  * Build a path-to-inode hash map from the in-memory inode tree.
  *
- * Intended for use after xal_open() without opts->file_lookupmode not set to 
+ * Intended for use after xal_open() without opts->file_lookupmode not set to
  * XAL_FILE_LOOKUPMODE_HASHMAP, or after xal_from_shm(), where xal_index() is not
  * called but the caller wants constant-time inode lookup via xal_get_inode(). Walks
  * the existing tree and populates the hash map locally. Any previously existing
@@ -649,7 +654,7 @@ xal_build_lookup_hashmap(struct xal *xal);
 
 /**
  * Retrieve the extents for the file at the given path.
- * 
+ *
  * This will search through the tree at xal->root to find the inode. This call fails if the entry
  * at the given path is not a file.
  *
@@ -670,12 +675,12 @@ xal_build_lookup_hashmap(struct xal *xal);
  * A re-snapshot frees the blocks behind extents resolved under an earlier sequence number, so an
  * I/O still in flight can land on blocks another file has since been given. The check after
  * completion tells you the data is not trustworthy; it does not prevent the transfer.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
-			   be given as if it was mounted at root ("/").
+ * @param path Absolute path to the file or directory. If opened with the XFS backend, the path
+ should be given as if it was mounted at root ("/").
  * @param extents Pointer for the found xal_extents
- * 
+ *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
@@ -683,19 +688,18 @@ xal_get_extents(struct xal *xal, char *path, struct xal_extents **extents);
 
 /**
  * Retrieve the directory entries for the directory at the given path.
- * 
+ *
  * This will search through the tree at xal->root to find the inode. This call fails if the entry
  * at the given path is not a directory.
- * 
+ *
  * @param xal The xal struct obtained when opened with xal_open()
- * @param path Absolute path to the file or directory. If opened with the XFS backend, the path should
-			   be given as if it was mounted at root ("/").
+ * @param path Absolute path to the file or directory. If opened with the XFS backend, the path
+ should be given as if it was mounted at root ("/").
  * @param dentries Pointer for the found xal_dentries
- * 
+ *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
 int
 xal_get_dentries(struct xal *xal, char *path, struct xal_dentries **dentries);
-
 
 #endif /* LIBXAL_H */
