@@ -1,11 +1,11 @@
 #define _GNU_SOURCE
 #include <asm-generic/errno.h>
-#include <libxnvme.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <khash.h>
 #include <libxal.h>
+#include <libxnvme.h>
 #include <linux/fiemap.h>
 #include <linux/fs.h>
 #include <pthread.h>
@@ -37,7 +37,7 @@ KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
  * the given path. Use path_map_clear() / path_map_destroy() to release them.
  */
 static int
-path_map_insert(khash_t(path_to_inode) *map, const char *path, struct xal_inode *inode)
+path_map_insert(khash_t(path_to_inode) * map, const char *path, struct xal_inode *inode)
 {
 	khiter_t iter;
 	char *key;
@@ -65,7 +65,7 @@ path_map_insert(khash_t(path_to_inode) *map, const char *path, struct xal_inode 
 }
 
 static void
-path_map_clear(khash_t(path_to_inode) *map)
+path_map_clear(khash_t(path_to_inode) * map)
 {
 	if (!map) {
 		return;
@@ -81,7 +81,7 @@ path_map_clear(khash_t(path_to_inode) *map)
 }
 
 static void
-path_map_destroy(khash_t(path_to_inode) *map)
+path_map_destroy(khash_t(path_to_inode) * map)
 {
 	if (!map) {
 		return;
@@ -100,7 +100,7 @@ path_map_destroy(khash_t(path_to_inode) *map)
  * first. See enum xal_watchmode for what that guarantees a reader.
  */
 struct xal_reflink {
-	char *dir;        ///< Shadow directory holding the clones: <mountpoint>/.xal_snapshot.<pid>
+	char *dir;	  ///< Shadow directory holding the clones: <mountpoint>/.xal_snapshot.<pid>
 	bool dir_created; ///< The shadow directory is created lazily on the first clone
 };
 
@@ -152,7 +152,8 @@ reflink_dir_purge(const char *dir)
 		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) {
 			continue;
 		}
-		if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) >= (int)sizeof(path)) {
+		if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) >=
+		    (int)sizeof(path)) {
 			XAL_DEBUG("FAILED: clone path truncated under dir(%s); skipping", dir);
 			continue;
 		}
@@ -162,8 +163,10 @@ reflink_dir_purge(const char *dir)
 			int cerr = reflink_chattr_immutable(fd, false);
 
 			if (cerr) {
-				XAL_DEBUG("WARNING: could not clear immutable on clone(%s); err(%d); the "
-					  "unlink below will likely fail", path, cerr);
+				XAL_DEBUG(
+				    "WARNING: could not clear immutable on clone(%s); err(%d); the "
+				    "unlink below will likely fail",
+				    path, cerr);
 			}
 			close(fd);
 		}
@@ -203,9 +206,11 @@ reflink_sweep_orphans(const char *mountpoint)
 		if (strncmp(entry->d_name, XAL_SNAPSHOT_PREFIX, sizeof(XAL_SNAPSHOT_PREFIX) - 1)) {
 			continue;
 		}
-		if (snprintf(dir, sizeof(dir), "%s/%s", mountpoint, entry->d_name) >= (int)sizeof(dir)) {
-			XAL_DEBUG("FAILED: shadow dir path truncated under mountpoint(%s); skipping",
-				  mountpoint);
+		if (snprintf(dir, sizeof(dir), "%s/%s", mountpoint, entry->d_name) >=
+		    (int)sizeof(dir)) {
+			XAL_DEBUG(
+			    "FAILED: shadow dir path truncated under mountpoint(%s); skipping",
+			    mountpoint);
 			continue;
 		}
 
@@ -213,7 +218,8 @@ reflink_sweep_orphans(const char *mountpoint)
 		// concurrent live instance on this mount.
 		if (strcmp(entry->d_name, own) != 0) {
 			XAL_DEBUG("WARNING: residual shadow directory(%s); prior crash or another "
-				  "live instance on this mount?", dir);
+				  "live instance on this mount?",
+				  dir);
 		}
 		reflink_dir_purge(dir);
 	}
@@ -264,13 +270,15 @@ reflink_clone_file(struct xal_be_fiemap *be, const char *path, int origin_fd, in
 	}
 
 	// No explicit fsync: FICLONE (xfs_reflink_remap_prep -> __generic_remap_file_range_prep)
-	// does filemap_write_and_wait_range on the source under the iolock, writing back the origin's
-	// dirty pages and resolving delalloc to real blocks before sharing -- exactly what the clone's
-	// FIEMAP needs. Device-flush durability is unneeded for the live raw-read model.
+	// does filemap_write_and_wait_range on the source under the iolock, writing back the
+	// origin's dirty pages and resolving delalloc to real blocks before sharing -- exactly what
+	// the clone's FIEMAP needs. Device-flush durability is unneeded for the live raw-read
+	// model.
 
-	// Name the clone "<ino>.<gen>". The inode number is the primary key ("find <mnt> -inum <ino>"
-	// maps a clone back to its current origin); the generation number distinguishes inode
-	// instances so a recycled inode -- freed and reallocated to a different file during the walk
+	// Name the clone "<ino>.<gen>". The inode number is the primary key ("find <mnt> -inum
+	// <ino>" maps a clone back to its current origin); the generation number distinguishes
+	// inode instances so a recycled inode -- freed and reallocated to a different file during
+	// the walk
 	// -- gets a fresh clone instead of being mistaken for the earlier one.
 	if (fstat(origin_fd, &sb)) {
 		XAL_DEBUG("FAILED: fstat(origin); errno(%d)", errno);
@@ -288,8 +296,8 @@ reflink_clone_file(struct xal_be_fiemap *be, const char *path, int origin_fd, in
 	}
 
 	// One clone per inode instance. EEXIST means this (ino, gen) was already cloned this run --
-	// a hardlink to the same inode -- so reuse the existing (already immutable) clone instead of
-	// cloning the same data again.
+	// a hardlink to the same inode -- so reuse the existing (already immutable) clone instead
+	// of cloning the same data again.
 	cfd = open(clone_path, O_RDWR | O_CREAT | O_EXCL, 0600);
 	if (cfd < 0) {
 		if (errno == EEXIST) {
@@ -313,10 +321,11 @@ reflink_clone_file(struct xal_be_fiemap *be, const char *path, int origin_fd, in
 		goto fail_created;
 	}
 
-	// Harden the clone: immutable makes the kernel refuse defrag (swapext/exchange-range) on it,
-	// so its physical extents cannot be relocated for the life of the snapshot. Immutable also
-	// blocks unlink/rm even as root, so xal clears it before unlinking (reflink_dir_purge); manual
-	// cleanup of an orphaned shadow dir needs: chattr -R -i <mnt>/.xal_snapshot.* && rm -rf <same>.
+	// Harden the clone: immutable makes the kernel refuse defrag (swapext/exchange-range) on
+	// it, so its physical extents cannot be relocated for the life of the snapshot. Immutable
+	// also blocks unlink/rm even as root, so xal clears it before unlinking
+	// (reflink_dir_purge); manual cleanup of an orphaned shadow dir needs: chattr -R -i
+	// <mnt>/.xal_snapshot.* && rm -rf <same>.
 	err = reflink_chattr_immutable(cfd, true);
 	if (err) {
 		XAL_DEBUG("FAILED: set immutable on clone(%s); err(%d)%s", clone_path, err,
@@ -363,8 +372,8 @@ xal_be_fiemap_close(struct xal *xal)
 			free(be->inotify);
 			be->inotify = NULL;
 		}
-		// A callback can have re-indexed since xal_close() marked the index dirty; a secondary
-		// attaching now must not get a handle on clones about to be purged.
+		// A callback can have re-indexed since xal_close() marked the index dirty; a
+		// secondary attaching now must not get a handle on clones about to be purged.
 		if (xal->state) {
 			xal_mark_dirty(xal);
 		}
@@ -595,8 +604,8 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	}
 
 	// Optional subtree: scope the index walk to a path at/under the mountpoint. General to the
-	// FIEMAP backend (any watch mode); in reflink-snapshot mode it also bounds what gets cloned,
-	// since only the walked files are reflinked.
+	// FIEMAP backend (any watch mode); in reflink-snapshot mode it also bounds what gets
+	// cloned, since only the walked files are reflinked.
 	if (opts->subtree && strlen(opts->subtree)) {
 		be->subtree = strdup(opts->subtree);
 		if (!be->subtree) {
@@ -606,9 +615,9 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		}
 		_strip_trailing_slashes(be->subtree);
 
-		// Matched against absolute, mountpoint-rooted paths, so it must be an absolute path at or
-		// under the mountpoint. Reject a malformed one (relative, typo, wrong mount) rather than
-		// silently indexing nothing.
+		// Matched against absolute, mountpoint-rooted paths, so it must be an absolute path
+		// at or under the mountpoint. Reject a malformed one (relative, typo, wrong mount)
+		// rather than silently indexing nothing.
 		if (!path_under_basepath(be->subtree, be->mountpoint)) {
 			XAL_DEBUG("FAILED: subtree(%s) is not under mountpoint(%s)", be->subtree,
 				  be->mountpoint);
@@ -616,8 +625,8 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 			goto failed;
 		}
 
-		// Require the subtree to exist and be a directory now, so a typo'd or missing path is
-		// rejected here with a clear error instead of surfacing later during the walk.
+		// Require the subtree to exist and be a directory now, so a typo'd or missing path
+		// is rejected here with a clear error instead of surfacing later during the walk.
 		err = _check_subtree(be->subtree, &sb);
 		if (err) {
 			goto failed;
@@ -646,8 +655,9 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 		snprintf(be->reflink->dir, dlen, "%s/" XAL_SNAPSHOT_PREFIX "%d", be->mountpoint,
 			 (int)getpid());
 
-		// Sweep pre-existing shadow dirs now so orphans are cleaned even if the caller never
-		// indexes; xal_index() sweeps again (and resets dir_created) before each (re)snapshot.
+		// Sweep pre-existing shadow dirs now so orphans are cleaned even if the caller
+		// never indexes; xal_index() sweeps again (and resets dir_created) before each
+		// (re)snapshot.
 		reflink_sweep_orphans(be->mountpoint);
 
 		XAL_DEBUG("INFO: reflink-snapshot mode; clones under dir(%s), subtree(%s)",
@@ -673,7 +683,8 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	}
 
 	// Scope the pre-count to the subtree when set: the index walks only that subtree
-	// (see xal_be_fiemap_index), so counting from the mountpoint would over-reserve the inode pool.
+	// (see xal_be_fiemap_index), so counting from the mountpoint would over-reserve the inode
+	// pool.
 	nallocated = retrieve_total_entries(be->subtree ? be->subtree : be->mountpoint);
 	if (nallocated < 0) {
 		XAL_DEBUG("Failed: retrieve_total_entries()");
@@ -796,10 +807,11 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 			continue;
 		}
 
-		// Never index our own reflink shadow dirs (defensive: they are purged before the walk,
-		// but skip any that are present so a re-index does not descend in and clone the clones).
-		if (be->reflink &&
-		    strncmp(entry->d_name, XAL_SNAPSHOT_PREFIX, sizeof(XAL_SNAPSHOT_PREFIX) - 1) == 0) {
+		// Never index our own reflink shadow dirs (defensive: they are purged before the
+		// walk, but skip any that are present so a re-index does not descend in and clone
+		// the clones).
+		if (be->reflink && strncmp(entry->d_name, XAL_SNAPSHOT_PREFIX,
+					   sizeof(XAL_SNAPSHOT_PREFIX) - 1) == 0) {
 			entry = readdir(d);
 			continue;
 		}
@@ -842,7 +854,8 @@ xal_be_fiemap_process_inode_dir(struct xal *xal, char *path, struct xal_inode *i
 	for (size_t i = 0; i < n_entries; i++) {
 		char *entry_name = entries[i];
 
-		struct xal_inode *dentry = xal_inode_at(xal, inode->content.dentries.inodes_idx + inode->content.dentries.count);
+		struct xal_inode *dentry = xal_inode_at(xal, inode->content.dentries.inodes_idx +
+								 inode->content.dentries.count);
 
 		size_t entry_namelen = strlen(entry_name);
 
@@ -913,8 +926,9 @@ fiemap_ioctl(int fd, struct fiemap *fiemap, bool sync)
 	}
 
 	if (sync) {
-		XAL_DEBUG("INFO: fiemap ioctl() with the flush failed; errno(%d); mapping without it",
-			  errno);
+		XAL_DEBUG(
+		    "INFO: fiemap ioctl() with the flush failed; errno(%d); mapping without it",
+		    errno);
 		fiemap->fm_flags = 0;
 		if (!ioctl(fd, FS_IOC_FIEMAP, fiemap)) {
 			return 0;
@@ -951,8 +965,8 @@ read_fiemap(int fd, struct fiemap **fiemap_ptr)
 	}
 
 	for (int attempt = 0; attempt < XAL_FIEMAP_ATTEMPTS; attempt++) {
-		fiemap->fm_length = ~0;  // maximum number of bits
-		fiemap->fm_extent_count = 0;  // read 0 extents
+		fiemap->fm_length = ~0;	     // maximum number of bits
+		fiemap->fm_extent_count = 0; // read 0 extents
 
 		err = fiemap_ioctl(fd, fiemap, !attempt);
 		if (err) {
@@ -1079,7 +1093,8 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 	if (fiemap->fm_mapped_extents > 0) {
 		struct xal_extents *extents;
 
-		err = xal_pool_claim_extents(&xal->extents, fiemap->fm_mapped_extents, &inode->content.extents.extent_idx);
+		err = xal_pool_claim_extents(&xal->extents, fiemap->fm_mapped_extents,
+					     &inode->content.extents.extent_idx);
 		if (err) {
 			XAL_DEBUG("FAILED: xal_pool_claim_extents(); err(%d)", err);
 			goto failed;
@@ -1092,9 +1107,9 @@ xal_be_fiemap_process_inode_file(struct xal *xal, char *path, struct xal_inode *
 			struct xal_extent *extent = xal_extent_at(xal, extents->extent_idx + i);
 
 			extent->start_offset = fiemap->fm_extents[i].fe_logical / xal->sb.blocksize;
-			extent->start_block  = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize;
-			extent->nblocks      = fiemap->fm_extents[i].fe_length / xal->sb.blocksize;
-			extent->flag         = fiemap_extent_flag(fiemap->fm_extents[i].fe_flags);
+			extent->start_block = fiemap->fm_extents[i].fe_physical / xal->sb.blocksize;
+			extent->nblocks = fiemap->fm_extents[i].fe_length / xal->sb.blocksize;
+			extent->flag = fiemap_extent_flag(fiemap->fm_extents[i].fe_flags);
 		}
 	}
 
@@ -1166,24 +1181,24 @@ process_ino_fiemap(struct xal *xal, char *path, struct xal_inode *self)
 	self->ino = stx.stx_ino;
 	self->size = stx.stx_size;
 
-	switch(self->ftype) {
-		case XAL_ODF_DIR3_FT_DIR:
-			err = xal_be_fiemap_process_inode_dir(xal, path, self);
-			if (err) {
-				XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_dir(); err(%d)", err);
-				return err;
-			}
-			break;
-		case XAL_ODF_DIR3_FT_REG_FILE:
-			err = xal_be_fiemap_process_inode_file(xal, path, self);
-			if (err) {
-				XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_file(); err(%d)", err);
-				return err;
-			}
-			break;
-		default:
-			XAL_DEBUG("FAILED: unsupported ftype");
-			return -ENOSYS;
+	switch (self->ftype) {
+	case XAL_ODF_DIR3_FT_DIR:
+		err = xal_be_fiemap_process_inode_dir(xal, path, self);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_dir(); err(%d)", err);
+			return err;
+		}
+		break;
+	case XAL_ODF_DIR3_FT_REG_FILE:
+		err = xal_be_fiemap_process_inode_file(xal, path, self);
+		if (err) {
+			XAL_DEBUG("FAILED: xal_be_fiemap_process_inode_file(); err(%d)", err);
+			return err;
+		}
+		break;
+	default:
+		XAL_DEBUG("FAILED: unsupported ftype");
+		return -ENOSYS;
 	}
 
 	return 0;
@@ -1259,20 +1274,20 @@ xal_be_fiemap_index(struct xal *xal)
 	root->content.extents.count = 0;
 	root->content.dentries.count = 0;
 
-	// In reflink mode, sweep every shadow dir under the mountpoint before the walk -- orphans left
-	// by a crashed prior run (any pid) and this handle's own previous index -- then reset so the
-	// dir is rebuilt fresh. This cleans orphans, makes a re-index re-snapshot the current tree, and
-	// keeps the shadow dir absent while the mountpoint is enumerated (so the walk cannot descend
-	// into it and clone the clones).
+	// In reflink mode, sweep every shadow dir under the mountpoint before the walk -- orphans
+	// left by a crashed prior run (any pid) and this handle's own previous index -- then reset
+	// so the dir is rebuilt fresh. This cleans orphans, makes a re-index re-snapshot the
+	// current tree, and keeps the shadow dir absent while the mountpoint is enumerated (so the
+	// walk cannot descend into it and clone the clones).
 	if (be->reflink) {
 		reflink_sweep_orphans(be->mountpoint);
 		be->reflink->dir_created = false;
 	}
 
 	// Scope the walk to the subtree when set: only files under it are indexed, so there is no
-	// reason to traverse anything outside it. Rerooting the tree at the subtree keeps absolute-path
-	// lookups working -- xal_be_fiemap_get_inode() strips the same subtree prefix as its basepath
-	// (see there).
+	// reason to traverse anything outside it. Rerooting the tree at the subtree keeps
+	// absolute-path lookups working -- xal_be_fiemap_get_inode() strips the same subtree prefix
+	// as its basepath (see there).
 	char *walk_root = be->subtree ? be->subtree : be->mountpoint;
 
 	err = process_ino_fiemap(xal, walk_root, root);
@@ -1282,7 +1297,8 @@ xal_be_fiemap_index(struct xal *xal)
 	}
 
 	if (be->reflink) {
-		XAL_DEBUG("INFO: reflink snapshot complete; clones under dir(%s)", be->reflink->dir);
+		XAL_DEBUG("INFO: reflink snapshot complete; clones under dir(%s)",
+			  be->reflink->dir);
 	}
 
 exit:
@@ -1317,7 +1333,7 @@ build_hashmap_walk(struct xal *xal, struct xal_inode *inode, char *path, size_t 
 	if (xal_inode_is_dir(inode)) {
 		for (uint32_t i = 0; i < inode->content.dentries.count; i++) {
 			struct xal_inode *child =
-				xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
+			    xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
 
 			if (!child) {
 				XAL_DEBUG("FAILED: dentry index out of range");

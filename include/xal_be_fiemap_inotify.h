@@ -8,8 +8,8 @@
 
 struct xal_inotify {
 	enum xal_watchmode watch_mode;
-	int fd;           ///< inotify descriptor, or -1 when no watch mode is in use
-	void *inode_map;  ///< Map of watch descriptors to the directory inodes they watch
+	int fd;		 ///< inotify descriptor, or -1 when no watch mode is in use
+	void *inode_map; ///< Map of watch descriptors to the directory inodes they watch
 	pthread_t watch_thread_id;
 	atomic_int flag;
 	atomic_bool stop;

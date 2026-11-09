@@ -199,7 +199,7 @@ xal_be_fiemap_inotify_drain(struct xal_inotify *inotify)
 int
 xal_be_fiemap_inotify_clear_inode_map(struct xal_inotify *inotify)
 {
-	khash_t(wd_to_inode) *inode_map;
+	khash_t(wd_to_inode) * inode_map;
 
 	if (!inotify) {
 		XAL_DEBUG("FAILED: No inotify object given");
@@ -229,7 +229,7 @@ xal_be_fiemap_inotify_clear_inode_map(struct xal_inotify *inotify)
 int
 xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path, struct xal_inode *inode)
 {
-	khash_t(wd_to_inode) *inode_map;
+	khash_t(wd_to_inode) * inode_map;
 	/* IN_MOVE_SELF and IN_DELETE_SELF report on the watched directory itself. Without them the
 	 * index root's disappearance is invisible: every other directory is covered by the watch
 	 * on its parent, and nothing watches above the root. */
@@ -264,7 +264,8 @@ xal_be_fiemap_inotify_add_watcher(struct xal_inotify *inotify, char *path, struc
 }
 
 static __attribute__((unused)) int
-inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
+inotify_event_mask_pp(uint32_t mask, char *str, int str_sz)
+{
 	int wrtn, idx = 0;
 
 	if (mask & IN_MODIFY) {
@@ -318,8 +319,8 @@ inotify_event_mask_pp(uint32_t mask, char *str, int str_sz) {
 /*
  * Find the indexed entry an event names, and assemble its path into @path from the directory the
  * event's watch is on. Sets @inode to NULL when that directory holds no such entry. Returns -ENOENT
- * when the watch is not one of ours, -ESTALE when the directory's span is out of range, or the error
- * from assembling the path.
+ * when the watch is not one of ours, -ESTALE when the directory's span is out of range, or the
+ * error from assembling the path.
  */
 static int
 event_entry(struct xal *xal, struct xal_inotify *inotify, struct inotify_event *event,
@@ -401,7 +402,7 @@ path_is_skipped(const char *path)
 static int
 check_events(struct xal *xal, struct xal_inotify *inotify)
 {
-	char buf[4096] __attribute__ ((aligned(__alignof__(struct inotify_event))));
+	char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
 	char path[XAL_INODE_PATH_MAXLEN + 1];
 	struct xal_inode *inode;
 	ssize_t len, i;
@@ -417,8 +418,8 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 
 			XAL_DEBUG_FCALL(inotify_event_mask_pp, event->mask, mask_pp, 128);
 			/* len is 0 for events about the watched directory itself. */
-			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1], event->wd,
-				  event->len ? event->name : "(none)")
+			XAL_DEBUG("INFO: mask(%s) for event with wd(%d) and name(%s)", &mask_pp[1],
+				  event->wd, event->len ? event->name : "(none)")
 
 			/* Events were dropped: wd is -1 and no name is carried, so nothing here can
 			 * say what changed. */
@@ -454,19 +455,21 @@ check_events(struct xal *xal, struct xal_inotify *inotify)
 				continue;
 			}
 
-			/* The index skips symlinks, special files and mount points, so an event naming
-			 * an entry it lacks is ignored when statx() finds one of those there. Only a
-			 * clean index is consulted: xal_inode_path() refuses a dirty one, and a failed
-			 * index lacking an entry proves nothing. The lookup reads the watch map and the
-			 * pools, which xal_index() rewrites under index_lock; while xal->indexing is
-			 * set, or when the trylock fails, the event counts as a change. */
+			/* The index skips symlinks, special files and mount points, so an event
+			 * naming an entry it lacks is ignored when statx() finds one of those
+			 * there. Only a clean index is consulted: xal_inode_path() refuses a dirty
+			 * one, and a failed index lacking an entry proves nothing. The lookup reads
+			 * the watch map and the pools, which xal_index() rewrites under index_lock;
+			 * while xal->indexing is set, or when the trylock fails, the event counts
+			 * as a change. */
 			if (event->len && !atomic_load(&xal->indexing) &&
 			    !pthread_mutex_trylock(&inotify->index_lock)) {
 				bool missing;
 
 				inode = NULL;
-				missing = !event_entry(xal, inotify, event, &inode, path, sizeof(path)) &&
-					  !inode;
+				missing =
+				    !event_entry(xal, inotify, event, &inode, path, sizeof(path)) &&
+				    !inode;
 				pthread_mutex_unlock(&inotify->index_lock);
 
 				if (missing && path_is_skipped(path)) {
@@ -543,14 +546,16 @@ background_thread_start(void *arg)
 				/* xal_index() advances seq_lock twice whether or not it worked,
 				 * so on failure the advance is not a new version. Latch to where
 				 * it ended up, so as to not fire again. */
-				cb_seq = atomic_load(&xal->last_index_err) ? atomic_load(xal->seq_lock)
-									  : seq;
+				cb_seq = atomic_load(&xal->last_index_err)
+					     ? atomic_load(xal->seq_lock)
+					     : seq;
 				continue;
 			}
 
 			/* Already fired for this version; only a new event re-arms us, and it must
 			 * be read through check_events(), which tells a change from IN_IGNORED and
-			 * from our own snapshot work. The poll is the wait; the fd is non-blocking. */
+			 * from our own snapshot work. The poll is the wait; the fd is non-blocking.
+			 */
 			err = poll(&pfd, 1, XAL_INOTIFY_POLL_TIMEOUT_MS);
 			if (err < 0) {
 				if (errno == EINTR) {
@@ -609,7 +614,6 @@ background_thread_start(void *arg)
 			XAL_DEBUG("INFO: Found breaking changes, marking xal as dirty");
 			xal_mark_dirty(xal);
 		}
-
 	}
 
 exit_thread:

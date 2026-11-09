@@ -43,12 +43,12 @@ enum xal_state {
 
 struct xal_shared_state {
 	_Atomic uint64_t magic; ///< XAL_SHM_MAGIC, stored last, so zero means not yet published
-	uint32_t version; ///< XAL_SHM_VERSION
+	uint32_t version;	///< XAL_SHM_VERSION
 	enum xal_backend type;
 	struct xal_sb sb;
 	char mountpoint[XAL_PATH_MAXLEN];
 	char subtree[XAL_PATH_MAXLEN]; ///< Empty when the index covers the whole mount
-	atomic_int index_state; ///< One of enum xal_state
+	atomic_int index_state;	       ///< One of enum xal_state
 	atomic_int seq_lock; ///< Even when stable; odd while the pools are being rewritten in place
 };
 XAL_STATIC_ASSERT(offsetof(struct xal_shared_state, magic) == 0, "shm ABI");
@@ -64,17 +64,20 @@ XAL_STATIC_ASSERT(offsetof(struct xal_shared_state, version) == 8, "shm ABI");
  */
 struct xal {
 	struct xnvme_dev *dev;
-	struct xal_pool inodes;  ///< Pool of inodes in host-native format
+	struct xal_pool inodes;	 ///< Pool of inodes in host-native format
 	struct xal_pool extents; ///< Pool of extents in host-native format
-	uint32_t root_idx;       ///< Index of the root inode in the inodes pool
+	uint32_t root_idx;	 ///< Index of the root inode in the inodes pool
 	struct xal_sb sb;
 	uint8_t be[XAL_BACKEND_SIZE];
 	atomic_int *index_state; ///< One of enum xal_state; may point to external shared memory
 	atomic_int _index_state_storage; ///< Backing store for index_state when shm_name is not set
-	atomic_int *seq_lock;    ///< An uneven number indicates the struct is being modified and is not safe to read; may point to external shared memory
+	atomic_int *seq_lock; ///< An uneven number indicates the struct is being modified and is
+			      ///< not safe to read; may point to external shared memory
 	atomic_int _seq_lock_storage; ///< Backing store for seq_lock when shm_name is not set
-	struct xal_shared_state *state; ///< Mapped shared state region; non-NULL when shm_name was set
-	char *state_shm_name;           ///< Name of the _state shm region; set by primary only, for unlink on close
+	struct xal_shared_state
+	    *state;	      ///< Mapped shared state region; non-NULL when shm_name was set
+	char *state_shm_name; ///< Name of the _state shm region; set by primary only, for unlink on
+			      ///< close
 	enum xal_procrole procrole;
 
 	/* Held for the duration of xal_index(); a second caller is refused with -EBUSY. Separate
@@ -93,7 +96,8 @@ char *
 path_under_basepath(char *path, const char *basepath);
 
 int
-search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath, struct xal_inode **inode);
+search_by_traversal(struct xal *xal, struct xal_inode *root, char *path, char *basepath,
+		    struct xal_inode **inode);
 
 int
 compare_name_to_inode(const void *key, const void *elem);

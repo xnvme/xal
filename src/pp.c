@@ -11,7 +11,7 @@
 #include <xal_be_xfs.h>
 #include <xal_odf.h>
 
-#define BMAP_BLOCK_SIZE	512
+#define BMAP_BLOCK_SIZE 512
 
 static int
 xal_be_xfs_pp(struct xal *xal, struct xal_be_xfs *be);
@@ -68,14 +68,14 @@ xal_pp(struct xal *xal)
 	wrtn += printf("  sb.dirblocksize: %" PRIu32 "\n", xal->sb.dirblocksize);
 
 	switch (be->type) {
-		case XAL_BACKEND_XFS:
-			struct xal_be_xfs *xfs = (struct xal_be_xfs *)be;
-			wrtn += xal_be_xfs_pp(xal, xfs);
-			break;
-		case XAL_BACKEND_FIEMAP:
-			struct xal_be_fiemap *fiemap = (struct xal_be_fiemap *)be;
-			wrtn += xal_be_fiemap_pp(fiemap);
-			break;
+	case XAL_BACKEND_XFS:
+		struct xal_be_xfs *xfs = (struct xal_be_xfs *)be;
+		wrtn += xal_be_xfs_pp(xal, xfs);
+		break;
+	case XAL_BACKEND_FIEMAP:
+		struct xal_be_fiemap *fiemap = (struct xal_be_fiemap *)be;
+		wrtn += xal_be_fiemap_pp(fiemap);
+		break;
 	}
 
 	return wrtn;
@@ -183,7 +183,8 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode)
 		wrtn += printf("  dentries.count: %u\n", inode->content.dentries.count);
 
 		for (uint32_t i = 0; i < inode->content.dentries.count; ++i) {
-			struct xal_inode *child = xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
+			struct xal_inode *child =
+			    xal_inode_at(xal, inode->content.dentries.inodes_idx + i);
 
 			if (!child) {
 				wrtn += printf("  dentries: ~ # index out of range\n");
@@ -198,20 +199,21 @@ xal_inode_pp(struct xal *xal, struct xal_inode *inode)
 		uint32_t blocksize = xal_get_sb_blocksize(xal);
 		wrtn += printf("  extents.count: %u\n", inode->content.extents.count);
 		for (uint32_t i = 0; i < inode->content.extents.count; ++i) {
-			struct xal_extent *extent = xal_extent_at(xal, inode->content.extents.extent_idx + i);
-	        size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
+			struct xal_extent *extent =
+			    xal_extent_at(xal, inode->content.extents.extent_idx + i);
+			size_t fofz_begin, fofz_end, bofz_begin, bofz_end;
 
 			if (!extent) {
 				wrtn += printf("- ~ # index out of range\n");
 				break;
 			}
 
-	        fofz_begin = (extent->start_offset * blocksize) / BMAP_BLOCK_SIZE;
-	        fofz_end = fofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
-	        bofz_begin = xal_fsbno_offset(xal, extent->start_block) / BMAP_BLOCK_SIZE;
-	        bofz_end = bofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
-			wrtn += printf("- [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %"
-				    PRIu64 "]\n", fofz_begin, fofz_end, bofz_begin, bofz_end);
+			fofz_begin = (extent->start_offset * blocksize) / BMAP_BLOCK_SIZE;
+			fofz_end = fofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
+			bofz_begin = xal_fsbno_offset(xal, extent->start_block) / BMAP_BLOCK_SIZE;
+			bofz_end = bofz_begin + (extent->nblocks * blocksize) / BMAP_BLOCK_SIZE - 1;
+			wrtn += printf("- [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64 "]\n",
+				       fofz_begin, fofz_end, bofz_begin, bofz_end);
 		}
 		break;
 	}
@@ -283,17 +285,17 @@ xal_extent_converted_pp(struct xal_extent_converted *extent)
 	wrtn += printf("xal_extent_converted:\n");
 	wrtn += printf("  start_offset: %" PRIu64 "\n", extent->start_offset);
 	wrtn += printf("  start_block: %" PRIu64 "\n", extent->start_block);
-	
+
 	switch (extent->unit) {
-		case XAL_EXTENT_UNIT_BYTES:
-			wrtn += printf("  bytes: %" PRIu64 "\n", extent->size);
-			wrtn += printf("  unit: XAL_EXTENT_UNIT_BYTES\n");
+	case XAL_EXTENT_UNIT_BYTES:
+		wrtn += printf("  bytes: %" PRIu64 "\n", extent->size);
+		wrtn += printf("  unit: XAL_EXTENT_UNIT_BYTES\n");
 		break;
-		
-		case XAL_EXTENT_UNIT_LBA:
-			wrtn += printf("  nblocks: %" PRIu64 "\n", extent->size);
-			wrtn += printf("  unit: XAL_EXTENT_UNIT_LBA\n");
-			break;
+
+	case XAL_EXTENT_UNIT_LBA:
+		wrtn += printf("  nblocks: %" PRIu64 "\n", extent->size);
+		wrtn += printf("  unit: XAL_EXTENT_UNIT_LBA\n");
+		break;
 	}
 
 	return wrtn;
@@ -390,17 +392,17 @@ xal_inotify_pp(struct xal_inotify *inotify)
 	wrtn += printf("  inode_map addr: %p\n", inotify->inode_map);
 
 	switch (inotify->watch_mode) {
-		case XAL_WATCHMODE_NONE:
-			wrtn += printf("  watchmode: XAL_WATCHMODE_NONE\n");
-			break;
+	case XAL_WATCHMODE_NONE:
+		wrtn += printf("  watchmode: XAL_WATCHMODE_NONE\n");
+		break;
 
-		case XAL_WATCHMODE_REFLINK_SNAPSHOT:
-			wrtn += printf("  watchmode: XAL_WATCHMODE_REFLINK_SNAPSHOT\n");
-			break;
+	case XAL_WATCHMODE_REFLINK_SNAPSHOT:
+		wrtn += printf("  watchmode: XAL_WATCHMODE_REFLINK_SNAPSHOT\n");
+		break;
 
-		default:
-			wrtn += printf("  watchmode: ?\n");
-			break;
+	default:
+		wrtn += printf("  watchmode: ?\n");
+		break;
 	}
 
 	wrtn += printf("  watch_thread_id: %ld\n", inotify->watch_thread_id);
