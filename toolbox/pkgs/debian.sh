@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+XNVME_TAG=for-aisio-02112026
+
 # Query the linker version
 ld -v || true
 
@@ -28,6 +31,6 @@ pipx install cijoe==v0.9.51 --force --include-deps
 pipx ensurepath
 
 # Retrieve, build and install xNVMe from source
-git clone https://github.com/xnvme/xnvme.git
+git clone --branch "${XNVME_TAG}" https://github.com/xnvme/xnvme.git
 cd xnvme
 make common install
