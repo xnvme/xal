@@ -139,6 +139,12 @@ Writes through that descriptor do not wait; the next `xal_extents_release()`
 finds them by the file's size and ctime and returns `-ESTALE`, and the next
 acquire maps the file again.
 
+Such a caller needs no index. On a handle without one,
+`xal_extents_attach_fd()` without an inode makes one for the descriptor's file
+and returns it. A file of another filesystem is refused with `-EXDEV`. The
+handle stays without an index from the first such call for a regular file of
+its filesystem, successful or not: `xal_index()` then fails with `-EBUSY`.
+
 Where `XAL_WATCHMODE_REFLINK_SNAPSHOT` lets writers go ahead and keeps the
 old data for readers, this mode makes writers wait for readers, and writes
 nothing to the filesystem itself. It needs:

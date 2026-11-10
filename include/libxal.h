@@ -84,6 +84,7 @@ enum xal_watchmode {
 	 * (F_SETLEASE, F_RDLCK), so that a writer's open() or truncate() of the file waits until
 	 * the callers between xal_extents_acquire() and xal_extents_release() are done. While a
 	 * handle in this mode is open, a thread of xal's takes SIGRTMIN+7 and SIGIO; see README.md.
+	 * A caller with its files open needs no xal_index(); see xal_extents_attach_fd().
 	 * Not 2, which configs written for the removed extent-update mode still name.
 	 */
 	XAL_WATCHMODE_READ_LEASE = 3,
@@ -470,7 +471,9 @@ xal_dinodes_retrieve(struct xal *xal);
  * cost one extra re-index.
  *
  * This function will fail if given a xal handle obtained from xal_from_shm(), and with
- * XAL_WATCHMODE_READ_LEASE it fails with -EBUSY while extents are held, see xal_extents_acquire().
+ * XAL_WATCHMODE_READ_LEASE it fails with -EBUSY while extents are held, see xal_extents_acquire(),
+ * and on a handle on which xal_extents_attach_fd() was called without an inode for a regular file
+ * of its filesystem, whether or not that attach succeeded.
  *
  * @returns On success, 0 is returned. On error, negative errno is returned to indicate the error.
  */
@@ -744,13 +747,15 @@ xal_get_extents(struct xal *xal, char *path, struct xal_extents **extents);
  * leases belong to the process that opened the handle.
  *
  * @param xal The xal struct obtained when opened with xal_open() or xal_open_from_uri()
- * @param inode A regular file in the index
+ * @param inode A regular file in the index, or the inode xal_extents_attach_fd() made
  * @param extents Set to the file's extents on success
  *
  * @return On success, 0. -EAGAIN when the lease cannot be taken (the file is open for writing, or,
  * for a write lease, open elsewhere at all) or is being recalled, -ESTALE when the indexed path no
- * longer leads to the indexed file, -EMFILE when xal is out of descriptors and every file holding
- * one has readers, -ECHILD in a forked child, other negative errno on error.
+ * longer leads to the indexed file, -ENOLCK when the inode is from an xal_extents_attach_fd()
+ * without an inode, its file was detached and no attach has taken the inode since, -EMFILE when
+ * xal is out of descriptors and every file holding one has readers, -ECHILD in a forked child,
+ * other negative errno on error.
  */
 int
 xal_extents_acquire(struct xal *xal, struct xal_inode *inode, struct xal_extents **extents);
@@ -800,16 +805,31 @@ xal_extents_release(struct xal *xal, struct xal_inode *inode);
  * nothing; the next xal_extents_release() returns -ESTALE when the file's size or ctime changed.
  * README.md has the details.
  *
+ * With inode NULL, on a handle without an index, xal makes the inode for the file fd names and
+ * returns it in attached; xal_opts.subtree does not limit which file. A handle on which xal_index()
+ * failed during its walk counts as one with an index. That inode has no name. It is the caller's to
+ * pass until it calls an xal_extents_detach_fd() that returns 0. A later attach gets it, so no call
+ * may use it after that and none may be running on it when the detach is called: an
+ * xal_extents_acquire() that races the detach of its inode may return the next file's extents. The
+ * handle stays without an index from the first such call for a regular file of its filesystem, even
+ * one that fails as with -EAGAIN: from then on xal_index() fails with -EBUSY and releases no
+ * attachment, xal_get_root() returns NULL, and xal_get_inode() and xal_inode_path() fail with
+ * -EINVAL, or with -ESTALE if an xal_index() failed on the handle before.
+ *
  * @param xal The xal struct obtained when opened with xal_open() or xal_open_from_uri()
- * @param inode A regular file in the index
+ * @param inode A regular file in the index; NULL on a handle without an index
  * @param fd The caller's descriptor of that file
- * @param attached Set to the inode to pass for the attached file afterwards, which is inode; may be
- *        NULL
+ * @param attached Set to the inode to pass for the attached file afterwards: inode, or the one xal
+ *        made when inode is NULL; may be NULL unless inode is
  *
  * @return On success, 0. -EAGAIN when the lease cannot be taken now, where a retry may succeed;
  * -EBUSY when the file has readers, is being mapped, dropped or revoked, or is attached, or fd is
- * attached already; -EINVAL when the handle is not in XAL_WATCHMODE_READ_LEASE or fd is not the
- * file's; -ECHILD in a forked child; other negative errno as xal_extents_acquire().
+ * attached already; -EINVAL when the handle is not in XAL_WATCHMODE_READ_LEASE, fd is not a
+ * regular file or not the file's, inode is NULL on a handle with an index or not NULL on one
+ * without, or attached and inode are NULL; -EXDEV when inode is NULL and fd names a file of another
+ * filesystem; -ENOMEM when the inode pool is used up, or the extent pool is and no free region
+ * holds the file's extent count rounded up to a power of two; -ECHILD in a forked child; other
+ * negative errno as xal_extents_acquire().
  */
 int
 xal_extents_attach_fd(struct xal *xal, struct xal_inode *inode, int fd,
@@ -817,6 +837,9 @@ xal_extents_attach_fd(struct xal *xal, struct xal_inode *inode, int fd,
 
 /**
  * Release the lease xal_extents_attach_fd() took, and leave fd open
+ *
+ * When it returns 0 for an inode that xal_extents_attach_fd() made, that inode is no longer the
+ * caller's and no call on it may be running: see xal_extents_attach_fd().
  *
  * @return On success, 0. -EBUSY while the file has readers or is being mapped, dropped or revoked,
  * -EINVAL when it is not attached, -ECHILD in a forked child.

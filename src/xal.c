@@ -848,6 +848,12 @@ xal_inode_path(struct xal *xal, struct xal_inode *inode, char *buf, size_t buf_n
 		return -ESTALE;
 	}
 
+	// An inode made by xal_extents_attach_fd() has no parent, and would pass for the root
+	if (xal->root_idx == XAL_POOL_IDX_NONE) {
+		XAL_DEBUG("FAILED: Missing call to xal_index()");
+		return -EINVAL;
+	}
+
 	be = (struct xal_backend_base *)&xal->be;
 	if (be->type == XAL_BACKEND_FIEMAP) {
 		struct xal_be_fiemap *fiemap_be = (struct xal_be_fiemap *)&xal->be;
