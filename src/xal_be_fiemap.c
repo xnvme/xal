@@ -32,6 +32,8 @@ KHASH_MAP_INIT_STR(path_to_inode, struct xal_inode *)
 #define XAL_SNAPSHOT_ENTRY_MAXLEN (XAL_PATH_MAXLEN + 64)
 /** Times read_fiemap() maps a file whose mapping keeps growing before it gives up. */
 #define XAL_FIEMAP_ATTEMPTS 8
+// Elements the pools of a read-lease handle grow by, so that not every claim is an mprotect().
+#define XAL_LEASE_POOL_GROWBY 65536
 
 /**
  * Insert the given path into the path-to-inode map
@@ -706,7 +708,13 @@ xal_be_fiemap_open(struct xal **xal, char *mountpoint, struct xal_opts *opts)
 	// Scope the pre-count to the subtree when set: the index walks only that subtree
 	// (see xal_be_fiemap_index), so counting from the mountpoint would over-reserve the inode
 	// pool.
-	nallocated = retrieve_total_entries(be->subtree ? be->subtree : be->mountpoint);
+	// Not counted in read-lease mode: its handle may never be indexed, see
+	// xal_extents_attach_fd(), and its pools grow as they are claimed from.
+	if (opts->watch_mode == XAL_WATCHMODE_READ_LEASE) {
+		nallocated = XAL_LEASE_POOL_GROWBY;
+	} else {
+		nallocated = retrieve_total_entries(be->subtree ? be->subtree : be->mountpoint);
+	}
 	if (nallocated < 0) {
 		XAL_DEBUG("Failed: retrieve_total_entries()");
 		err = nallocated;
