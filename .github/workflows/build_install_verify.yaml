@@ -46,25 +46,47 @@ jobs:
     - name: Test
       run: make test-using-loop
 
-    - name: Upload CIJOE report
+    - name: CIJOE, upload report.html
       if: always()
       uses: actions/upload-artifact@v4.3.0
       with:
         name: cijoe-report
-        path: |
-          cijoe/cijoe-output
+        path: cijoe/cijoe-output/report.html
+
+    - name: CIJOE, archive cijoe-output
+      if: always()
+      run: |
+        tar czf cijoe-output.tar.gz cijoe/cijoe-output
+
+    - name: CIJOE, upload cijoe-output
+      if: always()
+      uses: actions/upload-artifact@v4.3.0
+      with:
+        name: cijoe-output
+        path: cijoe-output.tar.gz
 
     - name: Test, mounted
       id: mounted
       run: make test-reflink-using-loop
 
-    - name: Upload CIJOE report, mounted
+    - name: CIJOE, upload report.html, mounted
       if: always() && steps.mounted.outcome != 'skipped'
       uses: actions/upload-artifact@v4.3.0
       with:
         name: cijoe-report-mounted
-        path: |
-          cijoe/cijoe-output
+        path: cijoe/cijoe-output/report.html
+
+    - name: CIJOE, archive cijoe-output, mounted
+      if: always() && steps.mounted.outcome != 'skipped'
+      run: |
+        tar czf cijoe-output-mounted.tar.gz cijoe/cijoe-output
+
+    - name: CIJOE, upload cijoe-output, mounted
+      if: always() && steps.mounted.outcome != 'skipped'
+      uses: actions/upload-artifact@v4.3.0
+      with:
+        name: cijoe-output-mounted
+        path: cijoe-output-mounted.tar.gz
 
     - name: Test, read lease
       id: lease
@@ -73,18 +95,28 @@ jobs:
         XAL_TEST_SET_LEASE_BREAK_TIME: 1
       run: make test-lease-using-loop
 
-    - name: Upload CIJOE report, read lease
+    - name: CIJOE, upload report.html, read lease
       if: always() && steps.lease.outcome != 'skipped'
       uses: actions/upload-artifact@v4.3.0
       with:
         name: cijoe-report-lease
-        path: |
-          cijoe/cijoe-output
+        path: cijoe/cijoe-output/report.html
+
+    - name: CIJOE, archive cijoe-output, read lease
+      if: always() && steps.lease.outcome != 'skipped'
+      run: |
+        tar czf cijoe-output-lease.tar.gz cijoe/cijoe-output
+
+    - name: CIJOE, upload cijoe-output, read lease
+      if: always() && steps.lease.outcome != 'skipped'
+      uses: actions/upload-artifact@v4.3.0
+      with:
+        name: cijoe-output-lease
+        path: cijoe-output-lease.tar.gz
 
     - name: Upload index and block map artifacts
       if: always()
       uses: actions/upload-artifact@v4.3.0
       with:
         name: artifacts
-        path: |
-          /tmp/artifacts
+        path: /tmp/artifacts
