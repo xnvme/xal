@@ -96,3 +96,32 @@ Inodes and extents are stored in separate contiguous pools backed by `mmap`. Poo
 - Opening brace on new line for functions, same line for control flow (1TBS variant)
 - XFS on-disk values are big-endian; all public structs use native byte order
 - Error convention: return 0 on success, negative errno on failure
+- Variables may be declared at the top of any block, including a `for` body. Only a declaration after statements in the same block breaks this rule
+- Headers are not self-contained. Do not add an `#include` to `include/*.h` to satisfy a type a header uses; add the prerequisite to each `.c` file that needs it, above the dependent header. Forward declarations in headers are fine
+- Include `libxal.h` before `xal.h`, and both before `xal_be_fiemap.h`
+- Keep comments to one or two `//` lines stating the reason. Do not write multi-line `/* ... */` blocks explaining races, invariants or rationale; put that in the reply or commit message
+- Do not delete existing comments
+- Prefer the smallest diff that fixes the problem over a more defensive scheme that needs explaining
+
+## Project scope
+
+- xal only targets XFS, including through the FIEMAP backend. Problems that only matter on btrfs, bcachefs, overlayfs or other file systems are out of scope
+- Old Linux kernels are not supported. Problems that only occur on them, such as a missing statx attribute or ioctl, are out of scope
+
+## Working in this repository
+
+- Never commit to `main` or move it. Run `git branch --show-current` immediately before committing, amending or rebasing, and name the branch explicitly in any rebase or reset. If the current branch is `main`, stop and ask which topic branch to use
+- Do not commit, amend, reset, stash or rebase unless explicitly asked. Make the file edits and stop. Read-only git commands are fine
+- Do not remind the user to push or force-push
+- When asked to check includes or a similar mechanical property of code, apply the fixes rather than listing them, including related build wiring such as a new `.c` file in `meson.build`
+- When asked to check a commit message, pull request description or other prose the user wrote, report what you would change and leave the text alone
+- A commit message gives an overview to read alongside the diff. It does not need to list every behaviour change or error code
+- Answer design questions; do not treat them as requests to change code
+- When told a rule is invented, remove exactly that part and keep what is real
+- Before fixing a reported bug, trace the code path and confirm it exists. If it does not, push back with the evidence rather than adding a guard to be safe
+
+## Code review
+
+- Report only defects the diff introduced. Blame the line before writing a finding, and classify each sub-case separately
+- Leave out pre-existing bugs entirely, including under a separate heading
+- Leave out notes about code that works as intended
