@@ -32,7 +32,7 @@ make test-using-nvme    # real NVMe device
 
 Test configs are in `cijoe/configs/`. The loop config uses `/dev/loop7` and mounts at `/tmp/xal_testing`.
 
-Individual tests live in `cijoe/tests/` (e.g., `test_bmap.py`, `test_index.py`, `test_handle.py`). Tests run remotely via cijoe and compare xal output against `xfs_bmap`/`xfs_io` reference output.
+Individual tests live in `cijoe/tests/` (e.g., `test_bmap.py`, `test_index.py`, `test_handle.py`). Tests run via cijoe on the local machine and compare xal output against `xfs_bmap`/`xfs_io` reference output.
 
 ## Dependencies
 
@@ -55,7 +55,7 @@ Backend is auto-detected: if the device is mounted, FIEMAP is used; otherwise XF
 
 ### Core data flow
 
-1. `xal_open()` -- reads superblock + AG headers, sets up memory pools
+1. `xal_open()` -- reads superblock + AG headers (XFS) or `statfs()` (FIEMAP), sets up memory pools
 2. `xal_dinodes_retrieve()` -- reads all inodes from disk (XFS backend only)
 3. `xal_index()` -- builds the in-memory directory/file tree
 4. `xal_walk()` / `xal_get_inode()` / `xal_get_extents()` -- query the tree
@@ -77,15 +77,27 @@ Inodes and extents are stored in separate contiguous pools backed by `mmap`. Poo
 - `include/libxal_util.h` -- debug macros (`XAL_DEBUG`), static assert, unused-arg helpers
 - `include/xal.h` -- internal struct definitions
 - `include/xal_odf.h` -- XFS on-disk format constants and structures
+- `include/xal_be_xfs.h` -- XFS backend internals (allocation group state)
+- `include/xal_be_fiemap.h` -- FIEMAP backend internals, shared with the inotify watcher
+- `include/xal_be_fiemap_inotify.h` -- inotify watcher state
+- `include/xal_be_fiemap_lease.h` -- per-file lease state for `XAL_WATCHMODE_READ_LEASE`
+- `include/xal_pool.h` -- memory pool definitions
+- `include/xal_pp.h` -- pretty-printer declarations
 - `src/xal.c` -- core API implementation
 - `src/xal_be_xfs.c` -- XFS backend (direct on-disk parsing)
 - `src/xal_be_fiemap.c` -- FIEMAP backend
 - `src/xal_be_fiemap_inotify.c` -- inotify watcher for FIEMAP backend
+- `src/xal_be_fiemap_lease.c` -- read leases for FIEMAP backend (`XAL_WATCHMODE_READ_LEASE`)
 - `src/xal_pool.c` -- memory pool implementation
 - `src/pp.c` -- pretty-printers for xal structs
 - `src/utils.c` -- internal utility functions
 - `src/cli.c` -- `xal` command-line tool
 - `tools/xal_bmap_mp_yaml.c` -- multi-process bmap tool (shared-memory pools)
+- `tools/xal_snapshot_hold.c` -- test aid holding a reflink snapshot open
+- `tools/xal_lease_hold.c` -- test aid holding a file's extents under a read lease
+- `tools/test_shm_version.c` -- test that `xal_from_shm()` refuses a mismatched state version
+- `tools/test_mark_dirty.c` -- test that `xal_mark_dirty()` makes xal-server re-index
+- `tools/xal-server/` -- daemon publishing xal indexes over POSIX shared memory (optional, needs tomlc17)
 - `tp/khash.h` -- third-party hash map (used for file lookup mode)
 
 ## Code style
@@ -96,3 +108,20 @@ Inodes and extents are stored in separate contiguous pools backed by `mmap`. Poo
 - Opening brace on new line for functions, same line for control flow (1TBS variant)
 - XFS on-disk values are big-endian; all public structs use native byte order
 - Error convention: return 0 on success, negative errno on failure
+- Variables may be declared at the top of any block, including a `for` body. Only a declaration after statements in the same block breaks this rule
+- Headers are not self-contained. Do not add an `#include` to `include/*.h` to satisfy a type a header uses; add the prerequisite to each `.c` file that needs it, above the dependent header. Forward declarations in headers are fine. This is with one exception: `include/libxal.h` is installed as a public header, so this must include necessary headers.
+- Include `libxal.h` before `xal.h`, and both before `xal_be_fiemap.h`
+- Keep comments to one or two `//` lines stating the reason. Do not write multi-line `/* ... */` blocks explaining races, invariants or rationale; put that in the reply or commit message
+- Do not delete existing comments
+- Prefer the smallest diff that fixes the problem over a more defensive scheme that needs explaining
+
+## Project scope
+
+- xal only targets XFS, including through the FIEMAP backend. Problems that only matter on btrfs, bcachefs, overlayfs or other file systems are out of scope
+- Old Linux kernels are not supported. Problems that only occur on them, such as a missing statx attribute or ioctl, are out of scope
+
+## Code review
+
+- Report only defects the diff introduced. Blame the line before writing a finding, and classify each sub-case separately
+- Leave out pre-existing bugs entirely, including under a separate heading
+- Leave out notes about code that works as intended
