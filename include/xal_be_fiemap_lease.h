@@ -1,14 +1,6 @@
 #ifndef XAL_BE_FIEMAP_LEASE_H
 #define XAL_BE_FIEMAP_LEASE_H
 
-#include <khash.h>
-#include <libxal.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <sys/types.h>
-
 /**
  * Per-file state in XAL_WATCHMODE_READ_LEASE
  *
