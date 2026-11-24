@@ -380,9 +380,9 @@ xal_open(struct xnvme_dev *dev, struct xal **xal, struct xal_opts *opts)
 		return err;
 	}
 
-	fidx = ns->flbas.format;
+	fidx = xnvme_bits_get(ns->flbas, XNVME_SPEC_IDFY_NS_FLBAS_FORMAT);
 	if (ns->nlbaf > 16) {
-		fidx += ns->flbas.format_msb << 4;
+		fidx += xnvme_bits_get(ns->flbas, XNVME_SPEC_IDFY_NS_FLBAS_FORMAT_MSB) << 4;
 	}
 
 	(*xal)->sb.lba_blksze = 1U << ns->lbaf[fidx].ds;
