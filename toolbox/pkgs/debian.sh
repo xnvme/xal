@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-XNVME_TAG=for-aisio-02112026
+XNVME_TAG=v0.8.0
 
 # Query the linker version
 ld -v || true
