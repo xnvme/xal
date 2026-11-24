@@ -40,8 +40,8 @@ xal_be_xfs_index(struct xal *xal);
 static int
 dev_read(struct xnvme_dev *dev, void *buf, size_t count, uint64_t offset)
 {
-	struct xnvme_cmd_ctx ctx = xnvme_cmd_ctx_from_dev(dev);
 	const struct xnvme_geo *geo = xnvme_dev_get_geo(dev);
+	struct xnvme_cmd_ctx ctx;
 	int err;
 
 	if (count > geo->mdts_nbytes) {
@@ -56,6 +56,12 @@ dev_read(struct xnvme_dev *dev, void *buf, size_t count, uint64_t offset)
 	if (offset % geo->lba_nbytes) {
 		XAL_DEBUG("FAILED: dev_read(...) -- unaligned offset(%zu);", offset);
 		return -EINVAL;
+	}
+
+	err = xnvme_dev_get_cmd_ctx(dev, &ctx);
+	if (err) {
+		XAL_DEBUG("FAILED: xnvme_dev_get_cmd_ctx(); err(%d)", err);
+		return err;
 	}
 
 	memset(buf, 0, count);

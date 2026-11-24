@@ -41,7 +41,7 @@ on_signal(int signo)
 int
 main(int argc, char *argv[])
 {
-	struct xnvme_opts xnvme_opts = xnvme_opts_default();
+	struct xnvme_opts xnvme_opts = {0};
 	struct xal_opts opts = {0};
 	struct sigaction sa = {0};
 	struct xnvme_dev *dev;
@@ -57,6 +57,7 @@ main(int argc, char *argv[])
 	mountpoint = argv[2];
 	subtree = (argc == 4) ? argv[3] : NULL;
 
+	xnvme_opts_set_defaults(&xnvme_opts);
 	xnvme_opts.be = "linux"; // reflink mode targets a mounted fs; match the daemon's backend
 	dev = xnvme_dev_open(dev_uri, &xnvme_opts);
 	if (!dev) {
