@@ -36,7 +36,7 @@ Individual tests live in `cijoe/tests/` (e.g., `test_bmap.py`, `test_index.py`, 
 
 ## Dependencies
 
-- xNVMe >= 0.7.0 (built from source via `toolbox/pkgs/debian.sh`)
+- xNVMe 0.8.0 or later (built from source via `toolbox/pkgs/debian.sh`)
 - meson build system
 - `xfslibs-dev`, `xfsprogs` (for XFS headers/tools)
 - `librt` (POSIX shared memory / timers)

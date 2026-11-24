@@ -21,7 +21,7 @@ forensics, recovery, or repair.
 
 Dependencies:
 
-- `xnvme` >= 0.7.0 -- must be installed and visible to `pkg-config`
+- `xnvme` 0.8.0 or later -- must be installed and visible to `pkg-config`
 - `librt`
 
 The default `make` target runs clean, configure, build, and install in one
