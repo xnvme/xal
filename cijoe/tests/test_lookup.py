@@ -59,7 +59,7 @@ def test_lookup_after_reindex(cijoe, require_mount):
     traversal and through the hash map, follow the change.
     """
 
-    mountpoint = cijoe.getconf("xal.mountpoint", None)
+    _, mountpoint = require_mount
 
     err, state = cijoe.run(f"xal_test_lookup_map {mountpoint}")
     assert not err, state.output()

@@ -32,16 +32,6 @@ def _require_server(cijoe):
         pytest.skip("xal-server is not installed")
 
 
-def _require_mount(cijoe):
-    dev_path = cijoe.getconf("xal.dev_path", None)
-    mountpoint = cijoe.getconf("xal.mountpoint", None)
-
-    src = _capture(cijoe, f"findmnt -n -o SOURCE {mountpoint}")
-    if src != dev_path:
-        pytest.skip(f"{mountpoint} is not mounted from {dev_path}")
-    return dev_path, mountpoint
-
-
 def _wait_for(cijoe, cmd, want_ok, seconds):
     for _ in range(seconds * 10):
         err, _ = cijoe.run(cmd)
@@ -89,12 +79,12 @@ def _stop_server(cijoe, pid):
     )
 
 
-def test_none_reindexes_on_a_readers_mark(cijoe):
+def test_none_reindexes_on_a_readers_mark(cijoe, require_mount):
     """In XAL_WATCHMODE_NONE, a file created after start-up is indexed once a reader marks the
     index dirty."""
 
     _require_server(cijoe)
-    dev_path, mountpoint = _require_mount(cijoe)
+    dev_path, mountpoint = require_mount
     new = f"{mountpoint}/xal_server_new"
 
     cijoe.run(f"rm -f {new}")
@@ -107,12 +97,12 @@ def test_none_reindexes_on_a_readers_mark(cijoe):
         cijoe.run(f"rm -f {new}")
 
 
-def test_none_retries_a_failed_reindex(cijoe):
+def test_none_retries_a_failed_reindex(cijoe, require_mount):
     """In XAL_WATCHMODE_NONE, a re-index that fails, here because the subtree is gone, is tried
     again until it succeeds."""
 
     _require_server(cijoe)
-    dev_path, mountpoint = _require_mount(cijoe)
+    dev_path, mountpoint = require_mount
     subtree = f"{mountpoint}/xal_server_sub"
     new = f"{subtree}/new"
 

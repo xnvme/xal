@@ -31,7 +31,7 @@ def test_shm_primary_secondary(cijoe, require_mount):
     """Run xal_test_shm on the mounted device: secondaries from xal_from_shm() share the
     primary's index"""
 
-    dev_path = cijoe.getconf("xal.dev_path", None)
+    dev_path, _ = require_mount
 
     err, state = cijoe.run(f"xal_test_shm {dev_path}")
     assert not err, state.output()
