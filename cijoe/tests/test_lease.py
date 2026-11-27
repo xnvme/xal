@@ -27,6 +27,8 @@ SWEEP_RE = re.compile(
 XAL_EXTENT_SHARED = 0x2  # enum xal_extent_flag
 FMR_OWN_FREE = "special_0:1"
 EINVAL = 22
+EXDEV = 18
+ENOLCK = 37
 ENOTSUP = 95
 ESTALE = 116
 EAGAIN = 11
@@ -893,7 +895,94 @@ def test_lease_attach_once_and_detach(cijoe):
     assert f"ATTACH_AGAIN err=-{EBUSY}" in out, f"attached twice:\n{out}"
     assert f"ATTACH_DUP err=-{EBUSY}" in out, f"attached again through a dup():\n{out}"
     assert f"DETACH err=0 lease={F_UNLCK} fd_open=1" in out, out
+    assert f"ATTACH_NO_INODE err=-{EINVAL}" in out, f"attached without an inode:\n{out}"
     assert f"ATTACH_AFTER_DETACH err=0 lease={F_RDLCK}" in out, f"no attach after detach:\n{out}"
     assert f"DETACH_VALID err=0 lease={F_UNLCK} fd_open=1" in out, f"detach kept the lease:\n{out}"
 
     cijoe.run(f"rm -f {path} {link}")
+
+
+def test_lease_attach_without_index_writer_waits_for_reader(cijoe):
+    """On a handle that was never indexed, a file attached by its descriptor alone holds a writer
+    back, and is leased again on that descriptor once the writer is done."""
+
+    _writer_waits_for_reader(cijoe, "xal_lease_noindex", "--attach --no-index")
+
+
+def test_lease_attach_without_index_once_and_detach(cijoe):
+    """Without an index a file is attached once, whichever descriptor names it, and only without an
+    inode. A file of another filesystem is refused, and so is xal_index(), with a file attached or
+    not. A detached file's inode is not mapped, and goes to the next file: two files attached
+    together use two inodes, cycle after cycle, and one extent region of 1 and one of 8 extents. A
+    file that outgrows its region while attached leaves it to the next file of that size."""
+
+    dev_path, mountpoint = _require_fixture(cijoe)
+    path, other = f"{mountpoint}/xal_lease_noindex_once", f"{mountpoint}/xal_lease_noindex_other"
+    _fill(cijoe, path, "A", 4096)
+    punch = " ".join(f"-c 'fpunch {block * 4096} 4096'" for block in (1, 3, 5, 7))
+    cijoe.run(f"xfs_io -f -c 'pwrite -q -S 0x46 0 40960' -c fsync {punch} -c fsync {other}")
+
+    out = _capture(
+        cijoe,
+        f"sudo xal_lease_hold --attach --no-index --cycles 1000 --other {other} {dev_path} "
+        f"{mountpoint} {path} --probe",
+    )
+    assert f"ATTACH err=0 lease={F_RDLCK}" in out, out
+    assert f"INDEX err=-{EBUSY}" in out, f"indexed with a file attached:\n{out}"
+    assert f"INODE_PATH err=-{EINVAL}" in out, f"a path for an inode without one:\n{out}"
+    assert "ACQUIRE err=0" in out and "RELEASE err=0" in out, out
+    assert f"ATTACH_AGAIN err=-{EBUSY}" in out, f"attached twice:\n{out}"
+    assert f"ATTACH_DUP err=-{EBUSY}" in out, f"attached again through a dup():\n{out}"
+    assert f"DETACH err=0 lease={F_UNLCK} fd_open=1" in out, out
+    assert f"ACQUIRE_DETACHED err=-{ENOLCK}" in out, f"a detached file was mapped:\n{out}"
+    assert f"ATTACH_INODE err=-{EINVAL}" in out, f"attached with an inode:\n{out}"
+    assert f"ATTACH_AFTER_DETACH err=0 lease={F_RDLCK}" in out, f"no attach after detach:\n{out}"
+    assert f"DETACH_VALID err=0 lease={F_UNLCK} fd_open=1" in out, f"detach kept the lease:\n{out}"
+    assert f"ATTACH_XDEV err=-{EXDEV}" in out, f"attached a file of another filesystem:\n{out}"
+    cycles = "CYCLES n=1000 failed=0 err=0 inodes=2 extents=6"
+    assert cycles in out, f"an inode or a region did not go to the next file:\n{out}"
+    assert f"INDEX_DETACHED err=-{EBUSY}" in out, f"indexed after attaching without one:\n{out}"
+    assert "ATTACH_AFTER_INDEX err=0" in out, f"no attach after the refused index:\n{out}"
+
+    # A failed attach leaves nothing behind: a retry works once the other descriptor is closed
+    out = _capture(
+        cijoe,
+        f"sudo xal_lease_hold --attach-rw --hold-open --no-index {dev_path} {mountpoint} {path} "
+        "--probe",
+    )
+    assert f"ATTACH err=-{EAGAIN}" in out, out
+    assert f"INDEX_AFTER_FAILED err=-{EBUSY}" in out, f"indexed after a failed attach:\n{out}"
+    assert f"ATTACH_RETRY err=0 lease={F_WRLCK}" in out, f"retry after a failed attach:\n{out}"
+    m = re.search(r"GROW err=0 extents=(\d+),(\d+),(\d+) idx=(\d+),(\d+),(\d+)", out)
+    assert m, f"the file did not grow and shrink under its attachments:\n{out}"
+    count, grown, cut, first, moved, again = map(int, m.groups())
+    assert grown > count == cut and moved != first, f"the file did not outgrow its region:\n{out}"
+    assert again == first, f"the region the file outgrew did not go to the next file:\n{out}"
+
+    cijoe.run(f"rm -f {path} {other}")
+
+
+def test_lease_attach_rw_without_index_own_write_found(cijoe):
+    """A write lease on a descriptor attached without an index finds the holder's own write, and
+    the file is mapped again on that descriptor."""
+
+    _own_write_found(cijoe, "xal_lease_noindex_own", "--no-index")
+
+
+def test_lease_attach_without_index_refused_in_forked_child(cijoe):
+    """A forked child of a process that attached a file without an index gets -ECHILD, and its
+    xal_close() leaves the parent's lease."""
+
+    dev_path, mountpoint = _require_fixture(cijoe)
+    path = f"{mountpoint}/xal_lease_noindex_fork"
+    _fill(cijoe, path, "A", 4096)
+
+    out = _capture(
+        cijoe,
+        f"sudo timeout -s KILL 20 xal_lease_hold --attach --no-index {dev_path} {mountpoint} "
+        f"{path} --fork",
+    )
+    assert "CHILD_ACQUIRE err=-10" in out, out
+    assert "PARENT_LEASE=1" in out, f"the child's close released the parent's lease:\n{out}"
+
+    cijoe.run(f"rm -f {path}")

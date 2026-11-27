@@ -33,20 +33,22 @@ struct xal_lease_entry {
 				    ///< timed out; 0 when it cannot, or after a stale release
 	atomic_bool stale;	    ///< A release found the extents may no longer hold the data
 	atomic_bool ref;	    ///< Acquired since the eviction hand last passed
-	uint32_t slot;		    ///< Position in held[], or attached[] for ufd, while held
+	uint32_t slot;		    ///< Position in held[], or attached[] for ufd, while held; of
+				    ///< an inode no file holds, the next such inode
 	int ufd; ///< The caller's descriptor from xal_extents_attach_fd(), never closed; -1 if none
 	int ltype;	       ///< F_RDLCK, or F_WRLCK on a caller's descriptor open for writing
 	struct timespec ctime; ///< The file's ctime once the lease was taken, for a write lease
 };
 
 KHASH_MAP_INIT_INT(fd_to_idx, uint32_t)
+KHASH_MAP_INIT_INT64(ino_to_idx, uint32_t)
 
 struct xal_lease_set {
 	struct xal *xal;
 	unsigned generation; ///< Of the process that took the leases; see lease_foreign()
 	dev_t dev;	     ///< Device of the mountpoint; a file elsewhere is not mapped
 	struct xal_lease_entry *entries; ///< Indexed like the inode pool
-	size_t nentries;
+	_Atomic size_t nentries; ///< Grows under ls->lock, without an index, while readers check it
 	kh_fd_to_idx_t *fd_map;	 ///< Lease fd to inode index, for the break notification
 	kh_fd_to_idx_t *ufd_map; ///< Attached descriptor to inode index, whatever the state
 	uint32_t *held;		 ///< Entries holding a lease on a descriptor of xal's, in no order
@@ -60,11 +62,20 @@ struct xal_lease_set {
 	int *dead;	   ///< Lease fds dropped under lock, closed by lease_unlock()
 	uint32_t ndead;
 	uint32_t dead_cap;
-	pthread_mutex_t lock; ///< Guards the maps, both lists, ufd, the extents pool and publishing
+	/// Guards the maps, both lists, ufd, the extents pool and publishing, and for the files
+	/// attached without an inode the other pools and the free lists
+	pthread_mutex_t lock;
 	struct xal_lease_stats stats;
 	struct xal_lease_set *next; ///< In the process-wide list of sets
 	uint32_t fiemap_batch;	    ///< xal_opts.lease_fiemap_batch, or XAL_FIEMAP_BATCH for 0
 	bool recheck;		    ///< !xal_opts.lease_no_recheck
+
+	// Of a handle without an index, whose inodes xal_extents_attach_fd() makes
+	struct xal_pool entry_pool; ///< Holds entries, so that they grow in place under the readers
+	kh_ino_to_idx_t *ino_map;   ///< Inode number to the inode made for it
+	uint32_t free_inode;	    ///< An inode no file holds, or XAL_POOL_IDX_NONE
+	uint32_t spare[32]; ///< Index + 1 of an extent region of 1 << i extents that no file holds,
+			    ///< the next one in its first extent's start_offset; 0 if none
 };
 
 int
@@ -73,7 +84,8 @@ xal_be_fiemap_lease_init(struct xal *xal, const char *mountpoint, const struct x
 /**
  * Release every lease and forget every mapping; for xal_index() before it clears the pools
  *
- * Returns -EBUSY, and leaves everything as is, when a caller holds extents and force is false.
+ * Returns -EBUSY, and leaves everything as is, when force is false and a caller holds extents or
+ * an attach without an inode was made on the handle.
  */
 int
 xal_be_fiemap_lease_reset(struct xal *xal, bool force);

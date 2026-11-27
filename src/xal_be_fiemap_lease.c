@@ -23,6 +23,7 @@
 #include <xal.h>
 #include <xal_be_fiemap.h>
 #include <xal_be_fiemap_lease.h>
+#include <xal_odf.h>
 #include <xal_pool.h>
 
 /** Extents per FIEMAP ioctl when xal_opts.lease_fiemap_batch is 0 */
@@ -704,6 +705,23 @@ lease_open_path(struct xal_lease_set *ls, struct xal_inode *inode)
 	}
 }
 
+// Called with ls->lock held and no reader on the extents of e. Keeps their region for the next
+// file of its size, so that files that come and go, or grow, do not use up the pool.
+static void
+lease_region_put(struct xal_lease_set *ls, struct xal_inode *inode, struct xal_lease_entry *e)
+{
+	uint32_t extent_idx = inode->content.extents.extent_idx;
+	int size;
+
+	if (!e->extent_cap) {
+		return;
+	}
+	size = __builtin_ctz(e->extent_cap);
+	xal_extent_at(ls->xal, extent_idx)->start_offset = ls->spare[size];
+	ls->spare[size] = extent_idx + 1;
+	e->extent_cap = 0;
+}
+
 /*
  * Called with the entry in MAPPING, which keeps other callers off it and readers off its extents.
  * Takes ls->lock only to publish, so a slow writeback holds up no lease break.
@@ -722,6 +740,9 @@ lease_and_map(struct xal_lease_set *ls, struct xal_inode *inode, uint32_t idx)
 
 	if (attached) {
 		fd = e->ufd;
+	} else if (ls->ino_map) {
+		// An inode made for an attached file has no path; its file was detached
+		return -ENOLCK;
 	} else {
 		e->ltype = F_RDLCK;
 		fd = lease_open_path(ls, inode);
@@ -796,15 +817,27 @@ lease_and_map(struct xal_lease_set *ls, struct xal_inode *inode, uint32_t idx)
 	extent_idx = inode->content.extents.extent_idx;
 	if (vec.n > e->extent_cap) {
 		uint32_t cap = 1;
+		int size;
 
 		/* Rounded up, as a file mapped again after an eviction may have grown */
 		while (cap < vec.n) {
 			cap <<= 1;
 		}
-		err = xal_pool_claim_extents(&ls->xal->extents, cap, &extent_idx);
-		if (err) {
-			lease_unlock(ls);
-			goto failed_unlock;
+		// Without an index files come and go, and one takes the region another put back
+		if (ls->ino_map) {
+			lease_region_put(ls, inode, e);
+		}
+		size = __builtin_ctz(cap);
+		if (!ls->spare[size]) {
+			err = xal_pool_claim_extents(&ls->xal->extents, cap, &extent_idx);
+			if (err) {
+				lease_unlock(ls);
+				goto failed_unlock;
+			}
+		}
+		if (ls->spare[size]) {
+			extent_idx = ls->spare[size] - 1;
+			ls->spare[size] = xal_extent_at(ls->xal, extent_idx)->start_offset;
 		}
 		/* Together, so that a mapping failing below leaves the cap with its region */
 		inode->content.extents.extent_idx = extent_idx;
@@ -1270,10 +1303,157 @@ lease_attach(struct xal *xal, struct xal_inode *inode, int fd)
 	return err;
 }
 
+// Called with ls->lock held, by the first attach without an inode to a handle without an index
+static int
+lease_unindexed_init(struct xal_lease_set *ls)
+{
+	int err;
+
+	ls->ino_map = kh_init(ino_to_idx);
+	if (!ls->ino_map) {
+		return -ENOMEM;
+	}
+	// A pool like the inodes', as readers of other files use the state while it grows
+	err = xal_pool_map(&ls->entry_pool, ls->xal->inodes.reserved, ls->xal->inodes.growby,
+			   sizeof(*ls->entries), NULL);
+	if (err) {
+		kh_destroy(ino_to_idx, ls->ino_map);
+		ls->ino_map = NULL;
+		return err;
+	}
+	ls->entries = ls->entry_pool.memory;
+	ls->free_inode = XAL_POOL_IDX_NONE;
+
+	return 0;
+}
+
+// Called with ls->lock held. An inode no file holds: the one put back last, or else a new one.
+static int
+lease_inode_get(struct xal_lease_set *ls, uint32_t *idx)
+{
+	int err;
+
+	if (ls->free_inode != XAL_POOL_IDX_NONE) {
+		*idx = ls->free_inode;
+		ls->free_inode = ls->entries[*idx].slot;
+		return 0;
+	}
+
+	err = xal_pool_claim_inodes(&ls->entry_pool, 1, NULL);
+	if (err) {
+		return err;
+	}
+	err = xal_pool_claim_inodes(&ls->xal->inodes, 1, idx);
+	if (err) {
+		// Kept in step with the inodes, which nothing else claims without an index
+		ls->entry_pool.free--;
+		return err;
+	}
+	ls->entries[*idx].fd = -1;
+	ls->entries[*idx].ufd = -1;
+	ls->nentries = *idx + 1;
+
+	return 0;
+}
+
+// Called with ls->lock held. Takes back the inode made for a file that is no longer attached.
+static void
+lease_inode_put(struct xal_lease_set *ls, uint32_t idx)
+{
+	struct xal_inode *inode = xal_inode_at(ls->xal, idx);
+	khiter_t it = kh_get(ino_to_idx, ls->ino_map, inode->ino);
+
+	if (it != kh_end(ls->ino_map) && kh_val(ls->ino_map, it) == idx) {
+		kh_del(ino_to_idx, ls->ino_map, it);
+	}
+	lease_region_put(ls, inode, &ls->entries[idx]);
+	ls->entries[idx].slot = ls->free_inode;
+	ls->free_inode = idx;
+}
+
+// xal_extents_attach_fd() without an inode, on a handle without an index. The inode is made from
+// the file's fstat() and has no name.
+static int
+lease_attach_unindexed(struct xal *xal, int fd, struct xal_inode **attached)
+{
+	struct xal_lease_set *ls = xal ? lease_set(xal) : NULL;
+	struct xal_inode *inode;
+	struct stat st;
+	uint32_t idx;
+	khiter_t it;
+	int ret, err = 0;
+
+	if (!ls || !attached || fd < 0 || xal->root_idx != XAL_POOL_IDX_NONE) {
+		return -EINVAL;
+	}
+	if (lease_foreign(ls)) {
+		return -ECHILD;
+	}
+	if (fstat(fd, &st)) {
+		return -errno;
+	}
+	if (!S_ISREG(st.st_mode)) {
+		return -EINVAL;
+	}
+	// Extents of a file on another filesystem address another device
+	if (st.st_dev != ls->dev) {
+		return -EXDEV;
+	}
+
+	pthread_mutex_lock(&ls->lock);
+	if (!ls->ino_map) {
+		err = lease_unindexed_init(ls);
+	}
+	// One inode for a file, so that a second descriptor of it finds the file attached
+	if (!err && kh_get(ino_to_idx, ls->ino_map, st.st_ino) != kh_end(ls->ino_map)) {
+		err = -EBUSY;
+	}
+	if (!err) {
+		err = lease_inode_get(ls, &idx);
+	}
+	if (!err) {
+		it = kh_put(ino_to_idx, ls->ino_map, st.st_ino, &ret);
+		if (ret < 0) {
+			lease_inode_put(ls, idx);
+			err = -ENOMEM;
+		}
+	}
+	if (err) {
+		lease_unlock(ls);
+		return err;
+	}
+	kh_val(ls->ino_map, it) = idx;
+
+	inode = xal_inode_at(xal, idx);
+	inode->ino = st.st_ino;
+	inode->ftype = XAL_ODF_DIR3_FT_REG_FILE;
+	inode->parent_idx = XAL_POOL_IDX_NONE;
+	lease_unlock(ls);
+
+	err = lease_attach(xal, inode, fd);
+	if (err) {
+		pthread_mutex_lock(&ls->lock);
+		lease_inode_put(ls, idx);
+		lease_unlock(ls);
+		return err;
+	}
+	*attached = inode;
+
+	return 0;
+}
+
 int
 xal_extents_attach_fd(struct xal *xal, struct xal_inode *inode, int fd, struct xal_inode **attached)
 {
 	int err;
+
+	if (!inode) {
+		return lease_attach_unindexed(xal, fd, attached);
+	}
+	// Without an index an inode comes from an attach, and is not given to one
+	if (xal && xal->root_idx == XAL_POOL_IDX_NONE) {
+		return -EINVAL;
+	}
 
 	err = lease_attach(xal, inode, fd);
 	if (!err && attached) {
@@ -1303,6 +1483,9 @@ xal_extents_detach_fd(struct xal *xal, struct xal_inode *inode)
 		xal_inode_at(xal, idx)->content.extents.count = 0;
 		lease_forget_ufd(ls, e);
 		atomic_store(&e->state, XAL_LEASE_UNMAPPED);
+		if (ls->ino_map) {
+			lease_inode_put(ls, idx);
+		}
 	}
 	lease_unlock(ls);
 
@@ -1368,6 +1551,12 @@ xal_be_fiemap_lease_reset(struct xal *xal, bool force)
 	}
 
 	pthread_mutex_lock(&ls->lock);
+	// An index clears the pools that the inodes made for attached files are in
+	if (!force && ls->ino_map) {
+		lease_unlock(ls);
+		XAL_DEBUG("FAILED: an attach without an inode was made on the handle");
+		return -EBUSY;
+	}
 	for (uint32_t i = 0; i < ls->nentries && !force; ++i) {
 		if (atomic_load(&ls->entries[i].readers)) {
 			lease_unlock(ls);
@@ -1508,7 +1697,13 @@ xal_be_fiemap_lease_close(struct xal *xal)
 
 	kh_destroy(fd_to_idx, ls->fd_map);
 	kh_destroy(fd_to_idx, ls->ufd_map);
-	free(ls->entries);
+	if (ls->ino_map) {
+		// The entries are the pool's then
+		kh_destroy(ino_to_idx, ls->ino_map);
+		xal_pool_unmap(&ls->entry_pool, false);
+	} else {
+		free(ls->entries);
+	}
 	free(ls->held);
 	free(ls->attached);
 	pthread_mutex_destroy(&ls->lock);

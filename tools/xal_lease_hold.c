@@ -9,7 +9,7 @@
  *
  * Usage: xal_lease_hold [--no-recheck] [--max <n>] [--batch <n>] [--exhaust]
  *                       [--attach | --attach-rw [--write-own]] [--map-first] [--hold-open]
- *                       [--link <file2>]
+ *                       [--no-index [--cycles <n> [--other <file2>]]] [--link <file2>]
  *                       [--probe | --shm | --thread | --fork | --orphan | --idle <file2> |
  *                        --sweep] <dev_uri> <mountpoint> <file>
  *
@@ -31,6 +31,24 @@
  * dup() of it, DETACH err=<err> lease=<F_GETLEASE> fd_open=<n>, ATTACH_AFTER_DETACH err=<err>
  * lease=<F_GETLEASE> for attaching it after that, and DETACH_VALID err=<err> lease=<F_GETLEASE>
  * fd_open=<n> for detaching it with the lease held.
+ * On a handle with an index it also prints, after DETACH, ATTACH_NO_INODE err=<err> for attaching
+ * the descriptor without an inode.
+ * --no-index, with --attach or --attach-rw, skips xal_index() and attaches without an inode, using
+ * the one xal_extents_attach_fd() returns. --probe then also prints INDEX err=<what xal_index()
+ * returned with the file attached> and INODE_PATH err=<what xal_inode_path() returned for the
+ * inode> first, and after DETACH, ACQUIRE_DETACHED err=<err> for an acquire and ATTACH_INODE
+ * err=<err> for an attach with the inode. At the end it prints ATTACH_XDEV err=<err> for attaching
+ * /proc/self/exe, a file of another filesystem. With --cycles <n> it then attaches, acquires,
+ * releases and detaches <file> n times, together with <file2> if --other <file2> is given, and
+ * prints CYCLES n=<n> failed=<n> err=<first error> inodes=<highest index of an inode returned,
+ * plus one> extents=<highest end of the extents handed out, as an index into the pool>. With
+ * --attach-rw it then writes four more blocks with holes between them while <file> is held,
+ * acquires it again, and attaches it once more after cutting it back to its first block, printing
+ * GROW err=<first error> extents=<n>,<n>,<n> idx=<i>,<i>,<i>, the number and the index of the
+ * extents at the three acquires. Last come INDEX_DETACHED err=<what xal_index() returned with
+ * nothing attached> and ATTACH_AFTER_INDEX err=<err> for an attach without an inode after it.
+ * With --hold-open, INDEX_AFTER_FAILED err=<what xal_index() returned after the failed attach>
+ * comes before ATTACH_RETRY.
  * --hold-open opens <file> read-only before the attach and closes it after, printing ATTACH_RETRY
  * err=<err> lease=<F_GETLEASE> for attaching again if the attach failed. --exhaust opens
  * /dev/null until no descriptor is left, after the extents are held, and acquires no more. Without
@@ -90,6 +108,9 @@ static int g_fd = -1;	  ///< The attached descriptor
 static bool g_write_own;
 static bool g_map_first;
 static bool g_hold_open;
+static bool g_no_index;
+static unsigned long g_cycles;
+static const char *g_other; ///< --other: a second file for --cycles
 
 static void
 on_signal(int signo)
@@ -111,13 +132,142 @@ first_byte(struct xal *xal, struct xal_extents *extents)
 	return xal_extent_at(xal, extents->extent_idx)->start_block * xal_get_sb_blocksize(xal);
 }
 
+// xal_extents_attach_fd(); with --no-index without an inode, setting *inode on success
+static int
+attach(struct xal *xal, struct xal_inode **inode, int fd)
+{
+	if (g_no_index) {
+		return xal_extents_attach_fd(xal, NULL, fd, inode);
+	}
+
+	return xal_extents_attach_fd(xal, *inode, fd, NULL);
+}
+
+// With --no-index and --attach-rw: the file outgrows its extent region while attached, and its
+// first region goes to the next file of that size, here the file itself cut back
+static void
+probe_grow(struct xal *xal)
+{
+	uint32_t blocksize = xal_get_sb_blocksize(xal), n[3] = {0}, idx[3] = {0};
+	struct xal_inode *inode = NULL;
+	struct xal_extents *extents;
+	struct stat st;
+	int err;
+
+	err = fstat(g_fd, &st) ? -errno : attach(xal, &inode, g_fd);
+	for (int i = 0; i < 3 && !err; ++i) {
+		err = xal_extents_acquire(xal, inode, &extents);
+		if (err) {
+			break;
+		}
+		n[i] = extents->count;
+		idx[i] = extents->extent_idx;
+		for (int block = 2; i == 0 && block <= 8; block += 2) {
+			if (pwrite(g_fd, "G", 1, st.st_size + (off_t)block * blocksize) != 1) {
+				err = -errno;
+			}
+		}
+		// The release finds the write of the first round by the file's size and ctime
+		xal_extents_release(xal, inode);
+		if (i == 1 && !err) {
+			err = xal_extents_detach_fd(xal, inode);
+			if (!err && ftruncate(g_fd, st.st_size)) {
+				err = -errno;
+			}
+			err = err ? err : attach(xal, &inode, g_fd);
+		}
+	}
+	printf("GROW err=%d extents=%u,%u,%u idx=%u,%u,%u\n", err, n[0], n[1], n[2], idx[0], idx[1],
+	       idx[2]);
+	if (!err) {
+		xal_extents_detach_fd(xal, inode);
+	}
+}
+
+// The end of --probe with --no-index: what goes to the next file, and that no index is taken
+static void
+probe_no_index(struct xal *xal)
+{
+	struct xal_inode *inode = NULL;
+	uint32_t inodes = 0, extents_end = 0;
+	unsigned long failed = 0;
+	int fd, other = -1, first = 0, err;
+
+	fd = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+	err = fd < 0 ? -errno : attach(xal, &inode, fd);
+	printf("ATTACH_XDEV err=%d\n", err);
+	if (fd >= 0) {
+		if (!err) {
+			xal_extents_detach_fd(xal, inode);
+		}
+		close(fd);
+	}
+
+	if (g_other) {
+		other = open(g_other, O_RDONLY | O_CLOEXEC);
+	}
+	for (unsigned long i = 0; i < g_cycles; ++i) {
+		struct xal_inode *held[2] = {NULL, NULL};
+
+		// With --other both files are attached at once, so that two inodes are in use
+		err = attach(xal, &held[0], g_fd);
+		if (!err && other >= 0) {
+			err = attach(xal, &held[1], other);
+		}
+		for (int k = 0; k < 2 && held[k] && !err; ++k) {
+			uint32_t idx = xal_inode_idx(xal, held[k]);
+			struct xal_extents *extents;
+
+			inodes = idx + 1 > inodes ? idx + 1 : inodes;
+			err = xal_extents_acquire(xal, held[k], &extents);
+			if (!err) {
+				uint32_t end = extents->extent_idx + extents->count;
+
+				extents_end = end > extents_end ? end : extents_end;
+				err = xal_extents_release(xal, held[k]);
+			}
+		}
+		for (int k = 0; k < 2 && held[k]; ++k) {
+			xal_extents_detach_fd(xal, held[k]);
+		}
+		if (err) {
+			first = first ? first : err;
+			failed++;
+		}
+	}
+	if (g_cycles) {
+		printf("CYCLES n=%lu failed=%lu err=%d inodes=%u extents=%u\n", g_cycles, failed,
+		       first, inodes, extents_end);
+	}
+	if (other >= 0) {
+		close(other);
+	}
+	if (g_attach == O_RDWR) {
+		probe_grow(xal);
+	}
+
+	printf("INDEX_DETACHED err=%d\n", xal_index(xal));
+	err = attach(xal, &inode, g_fd);
+	printf("ATTACH_AFTER_INDEX err=%d\n", err);
+	if (!err) {
+		xal_extents_detach_fd(xal, inode);
+	}
+}
+
 static int
 probe(struct xal *xal, struct xal_inode *inode, struct xal_inode *link)
 {
 	struct xal_extents *extents;
 	uint32_t blocksize = xal_get_sb_blocksize(xal);
+	struct xal_inode *other = inode;
 	int err, dup_fd;
 
+	if (g_no_index) {
+		char path[XAL_INODE_PATH_MAXLEN + 1];
+
+		printf("INDEX err=%d\n", xal_index(xal));
+		printf("INODE_PATH err=%d\n", xal_inode_path(xal, inode, path, sizeof(path)));
+	}
 	err = xal_extents_acquire(xal, inode, &extents);
 	printf("ACQUIRE err=%d\n", err);
 	if (err) {
@@ -160,19 +310,28 @@ probe(struct xal *xal, struct xal_inode *inode, struct xal_inode *link)
 		printf("BROKEN revoked=%" PRIu64 "\n", after.revoked - before.revoked);
 		printf("ATTACH_LINK err=%d\n", xal_extents_attach_fd(xal, link, g_fd, NULL));
 	}
-	printf("ATTACH_AGAIN err=%d\n", xal_extents_attach_fd(xal, inode, g_fd, NULL));
+	printf("ATTACH_AGAIN err=%d\n", attach(xal, &other, g_fd));
 	dup_fd = dup(g_fd);
-	printf("ATTACH_DUP err=%d\n", xal_extents_attach_fd(xal, inode, dup_fd, NULL));
+	printf("ATTACH_DUP err=%d\n", attach(xal, &other, dup_fd));
 	close(dup_fd);
 	err = xal_extents_detach_fd(xal, inode);
 	printf("DETACH err=%d lease=%d fd_open=%d\n", err, fcntl(g_fd, F_GETLEASE),
 	       fcntl(g_fd, F_GETFD) >= 0);
-	err = xal_extents_attach_fd(xal, inode, g_fd, NULL);
+	if (g_no_index) {
+		printf("ACQUIRE_DETACHED err=%d\n", xal_extents_acquire(xal, inode, &extents));
+		printf("ATTACH_INODE err=%d\n", xal_extents_attach_fd(xal, inode, g_fd, NULL));
+	} else {
+		printf("ATTACH_NO_INODE err=%d\n", xal_extents_attach_fd(xal, NULL, g_fd, &other));
+	}
+	err = attach(xal, &inode, g_fd);
 	printf("ATTACH_AFTER_DETACH err=%d lease=%d\n", err, fcntl(g_fd, F_GETLEASE));
 	if (!err) {
 		err = xal_extents_detach_fd(xal, inode);
 		printf("DETACH_VALID err=%d lease=%d fd_open=%d\n", err, fcntl(g_fd, F_GETLEASE),
 		       fcntl(g_fd, F_GETFD) >= 0);
+	}
+	if (g_no_index) {
+		probe_no_index(xal);
 	}
 
 	return 0;
@@ -495,12 +654,15 @@ main(int argc, char *argv[])
 	    {"map-first", no_argument, NULL, 'M'},
 	    {"hold-open", no_argument, NULL, 'H'},
 	    {"link", required_argument, NULL, 'L'},
+	    {"no-index", no_argument, NULL, 'N'},
+	    {"cycles", required_argument, NULL, 'C'},
+	    {"other", required_argument, NULL, 'O'},
 	    {NULL, 0, NULL, 0},
 	};
 	struct xal_opts opts = {0};
 	struct sigaction sa = {0};
 	sigset_t block, orig;
-	struct xal_inode *inode, *idle = NULL, *link = NULL;
+	struct xal_inode *inode = NULL, *idle = NULL, *link = NULL;
 	char *idle_path = NULL, *link_path = NULL;
 	struct xal *xal;
 	int c, mode = 0, err, ret;
@@ -544,6 +706,18 @@ main(int argc, char *argv[])
 			link_path = optarg;
 			continue;
 		}
+		if (c == 'N') {
+			g_no_index = true;
+			continue;
+		}
+		if (c == 'C') {
+			g_cycles = strtoul(optarg, NULL, 0);
+			continue;
+		}
+		if (c == 'O') {
+			g_other = optarg;
+			continue;
+		}
 		if (c == '?' || mode) {
 			mode = '?';
 			break;
@@ -553,11 +727,16 @@ main(int argc, char *argv[])
 			idle_path = optarg;
 		}
 	}
+	// Without an index there is one inode, the attached file's
+	if (g_no_index &&
+	    (g_attach < 0 || g_map_first || link_path || mode == 'i' || mode == 'w')) {
+		mode = '?';
+	}
 	if (mode == '?' || argc - optind != 3 || (g_write_own && g_attach != O_RDWR)) {
 		fprintf(stderr,
 			"Usage: %s [--no-recheck] [--max <n>] [--batch <n>] [--exhaust] "
 			"[--attach | --attach-rw [--write-own]] [--map-first] [--hold-open] "
-			"[--link <file2>] "
+			"[--no-index [--cycles <n> [--other <file2>]]] [--link <file2>] "
 			"[--probe | --shm | --thread | --fork | --orphan | --idle <file2> | "
 			"--sweep] "
 			"<dev_uri> <mountpoint> <file>\n",
@@ -599,8 +778,8 @@ main(int argc, char *argv[])
 		return 1;
 	}
 
-	err = xal_index(xal);
-	if (!err) {
+	err = g_no_index ? 0 : xal_index(xal);
+	if (!err && !g_no_index) {
 		err = xal_get_inode(xal, argv[2], &inode);
 	}
 	if (!err && idle_path) {
@@ -629,12 +808,15 @@ main(int argc, char *argv[])
 			err = xal_extents_acquire(xal, inode, &extents);
 			printf("MAPPED err=%d\n", err ? err : xal_extents_release(xal, inode));
 		}
-		err = open_err ? open_err : xal_extents_attach_fd(xal, inode, g_fd, NULL);
+		err = open_err ? open_err : attach(xal, &inode, g_fd);
 		printf("ATTACH err=%d lease=%d\n", err, g_fd < 0 ? -1 : fcntl(g_fd, F_GETLEASE));
 		if (held >= 0) {
+			if (err && g_no_index) {
+				printf("INDEX_AFTER_FAILED err=%d\n", xal_index(xal));
+			}
 			close(held);
 			if (err && !open_err) {
-				err = xal_extents_attach_fd(xal, inode, g_fd, NULL);
+				err = attach(xal, &inode, g_fd);
 				printf("ATTACH_RETRY err=%d lease=%d\n", err,
 				       fcntl(g_fd, F_GETLEASE));
 			}
